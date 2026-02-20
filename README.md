@@ -1,0 +1,23 @@
+# PrekT-BR :3
+
+Un navegador con terminal personalizada hecho con **Python + GTK4 + WebKitGTK 6.0**.
+
+Tiene barra de navegación, pestaña lateral con terminal de comandos personalizados, modo oscuro, y algunos mas
+
+## Características
+
+- Interfaz GTK4 moderna
+- Motor WebKitGTK 6.0 (rápido y ligero)
+- Terminal lateral con comandos custom (presiona Terminal para abrirla)
+
+## Requisitos (Arch Linux)
+
+Necesitas instalar estos paquetes:
+
+gtk4
+webkitgtk-6.0
+python
+python-gobject
+xdg-desktop-portal
+xdg-desktop-portal-gtk
+gobject-introspection
