@@ -1,4 +1,4 @@
-# PrekT-BR :3
+# PrekT-BR 
 
 Un navegador con terminal personalizada hecho con **Python + GTK4 + WebKitGTK 6.0**.
 
