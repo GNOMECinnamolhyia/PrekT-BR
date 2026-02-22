@@ -21,3 +21,8 @@ python-gobject
 xdg-desktop-portal
 xdg-desktop-portal-gtk
 gobject-introspection
+
+## Funiconalidad de Tor
+
+Este navegador tiene la funcion tormode para poder acceder a sitios onion, TEN CUIDADO, este navegador no esta hecho para reemplazar al Tor Browser.
+Siempre usa el Tor Browser antes que la funcion tormode de este navegador.
