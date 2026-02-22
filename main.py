@@ -9,7 +9,7 @@ import datetime
 import math
 import signal
 
-os.environ["GDK_DEBUG"] = "portals"  # Silencia el warning de portal settings
+os.environ["GDK_DEBUG"] = "portals"  # Silencia warnings de portal
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('WebKit', '6.0')
@@ -60,9 +60,10 @@ class BrowserWindow(Gtk.ApplicationWindow):
         super().__init__(application=app, title="PrekT-BR :3")
 
         self.app = app
-        self.webview = WebKit.WebView()
-        self.webview.set_vexpand(True)
-        self.webview.set_hexpand(True)
+        self.tor_active = False
+
+        # WebView inicial (sesión normal)
+        self.webview = self._create_webview(tor=False)
 
         self.settings = self.webview.get_settings()
 
@@ -149,14 +150,63 @@ class BrowserWindow(Gtk.ApplicationWindow):
 
         self.webview.load_uri(self.app.home_uri)
 
-        self.webview.connect('notify::uri', self.on_uri_changed)
-        self.webview.connect('notify::title', self.on_title_changed)
-        self.webview.connect('load-changed', self.on_load_changed)
-
-        self.print_to_terminal("PrekT-BR terminal\nEste navegador es beta, ten cuidado con los bugs!\n")
+        self.print_to_terminal("PrekT-BR terminal\nNUEVA FUNCIONALIDAD: 'tormode' PARA ACCEDER A TOR\n")
         self.print_prompt()
 
         self.terminal_visible = False
+
+    def _create_webview(self, tor=False):
+        """Crea un WebView nuevo, con o sin proxy Tor."""
+        if tor:
+            # WebKitGTK 6.0: el proxy se configura en NetworkSession
+            try:
+                network_session = WebKit.NetworkSession.new_ephemeral()
+                proxy_settings = WebKit.NetworkProxySettings.new(
+                    "socks5://127.0.0.1:9050", None
+                )
+                network_session.set_proxy_settings(
+                    WebKit.NetworkProxyMode.CUSTOM, proxy_settings
+                )
+                webview = WebKit.WebView(network_session=network_session)
+            except Exception:
+                # Fallback: variable de entorno (menos elegante pero funciona)
+                os.environ["SOCKS_PROXY"] = "socks5://127.0.0.1:9050"
+                webview = WebKit.WebView()
+
+            settings = WebKit.Settings.new()
+            settings.set_enable_webrtc(False)
+            settings.set_enable_mediasource(False)
+            settings.set_enable_encrypted_media(False)
+            settings.set_user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
+            )
+            webview.set_settings(settings)
+        else:
+            webview = WebKit.WebView()
+
+        webview.set_vexpand(True)
+        webview.set_hexpand(True)
+
+        # Conectar señales
+        webview.connect('notify::uri', self.on_uri_changed)
+        webview.connect('notify::title', self.on_title_changed)
+        webview.connect('load-changed', self.on_load_changed)
+
+        return webview
+
+    def _swap_webview(self, new_webview, load_uri=None):
+        """Reemplaza el WebView actual por uno nuevo en el layout."""
+        current_uri = self.webview.get_uri()
+        self.content_box.remove(self.webview)
+        self.webview = new_webview
+        # Insertar antes del terminal si está visible
+        self.content_box.prepend(self.webview)
+
+        uri_to_load = load_uri or current_uri
+        if uri_to_load and uri_to_load != "about:blank":
+            self.webview.load_uri(uri_to_load)
+        else:
+            self.webview.load_uri(self.app.home_uri)
 
     def print_prompt(self):
         self.print_to_terminal("> ", no_newline=True)
@@ -232,6 +282,24 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self.webview.evaluate_javascript(js, -1, None, None, None, None)
         return False
 
+    def enable_tor_mode(self):
+        if self.tor_active:
+            self.print_to_terminal("El modo Tor ya está activo.")
+            return
+
+        try:
+            os.environ["SOCKS5_SERVER"] = "127.0.0.1:9050"
+            os.environ["SOCKS_PROXY"] = "socks5://127.0.0.1:9050"
+            new_webview = self._create_webview(tor=True)
+            self._swap_webview(new_webview)
+            self.tor_active = True
+            self.print_to_terminal("  MODO TOR ACTIVADO")
+            self.print_to_terminal("  WebRTC DESACTIVADO.")
+            self.print_to_terminal("  TEN CUIDADO.")
+            self.print_to_terminal("  QUITA LA S DE TODOS LOS HTTPS:// AUTOMATICOS CUANDO VISITES SITIOS ONION.")
+        except Exception as e:
+            self.print_to_terminal(f"Error al activar Tor: {str(e)}")
+
     def process_command(self, cmd):
         parts = cmd.split(maxsplit=1)
         command = parts[0].lower() if parts else ""
@@ -244,7 +312,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 "  home                      → va a newtab.html\n"
                 "  google algo               → busca en Google\n"
                 "  yt video                  → busca en YouTube\n"
-                "  wiki algo                 → accede al articulo de Wikipedia (es)\n"
+                "  wiki algo                 → Wikipedia (es)\n"
                 "  cat                       → imágenes de gatos\n"
                 "  calc 2+3*4                → evalúa matemática\n"
                 "  time                      → hora actual\n"
@@ -260,91 +328,74 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 "  forward                   → adelante\n"
                 "  echo algo                 → repite texto\n"
                 "  quit / exit               → cierra el navegador\n"
-                "  arburarbustribiet         → ???\n"
+                "  arburarbustribiet         → Arbur Arbustribiet!!!\n"
+                "  tormode                   → activa modo Tor\n"
             )
+
+        elif command == "tormode":
+            self.enable_tor_mode()
 
         elif command == "home":
             self.webview.load_uri(self.app.home_uri)
-            self.print_to_terminal("Volviendo a home...")
 
         elif command == "google":
             if args:
                 query = urllib.parse.quote(args)
                 url = f"https://www.google.com/search?q={query}"
                 self.webview.load_uri(url)
-                self.print_to_terminal(f"Buscando '{args}' en Google...")
             else:
                 self.webview.load_uri("https://www.google.com")
-                self.print_to_terminal("Abriendo Google...")
 
         elif command == "yt":
             if args:
                 query = urllib.parse.quote(args)
                 url = f"https://www.youtube.com/results?search_query={query}"
                 self.webview.load_uri(url)
-                self.print_to_terminal(f"Buscando '{args}' en YouTube...")
             else:
                 self.webview.load_uri("https://www.youtube.com")
-                self.print_to_terminal("Abriendo YouTube...")
 
         elif command == "wiki":
             if args:
                 query = urllib.parse.quote(args)
                 url = f"https://es.wikipedia.org/wiki/{query}"
                 self.webview.load_uri(url)
-                self.print_to_terminal(f"Buscando '{args}' en Wikipedia (es)...")
             else:
                 self.webview.load_uri("https://es.wikipedia.org")
-                self.print_to_terminal("Abriendo Wikipedia...")
 
         elif command == "cat":
-            url = "https://www.google.com/search?q=gatos+graciosos&tbm=isch"
-            self.webview.load_uri(url)
-            self.print_to_terminal("Buscando imágenes de gatos...")
+            self.webview.load_uri("https://www.google.com/search?q=gatos+graciosos&tbm=isch")
 
         elif command == "calc":
             if args:
                 result = self.safe_eval(args)
                 self.print_to_terminal(f"{args} = {result}")
-            else:
-                self.print_to_terminal("Uso: calc [expresión]  ej: calc 2 + 3 * 4")
 
         elif command == "time":
             now = datetime.datetime.now().strftime("%H:%M:%S")
-            self.print_to_terminal(f"Hora actual: {now}")
+            self.print_to_terminal(f"{now}")
 
         elif command == "date":
             today = datetime.date.today().strftime("%Y-%m-%d")
-            self.print_to_terminal(f"Fecha actual: {today}")
+            self.print_to_terminal(f"{today}")
 
         elif command == "duckduckgo":
             if args:
                 query = urllib.parse.quote(args)
                 url = f"https://duckduckgo.com/?q={query}"
                 self.webview.load_uri(url)
-                self.print_to_terminal(f"Buscando '{args}' en DuckDuckGo...")
             else:
                 self.webview.load_uri("https://duckduckgo.com")
-                self.print_to_terminal("Abriendo DuckDuckGo...")
 
         elif command == "new":
             if args:
                 if not args.startswith(('http://', 'https://', 'file://')):
                     args = 'https://' + args
                 self.webview.load_uri(args)
-                self.print_to_terminal(f"Abrriendo: {args}")
-            else:
-                self.print_to_terminal("Uso: new [url]")
 
         elif command == "dark":
             self.app.dark_mode = not self.app.dark_mode
             if self.app.dark_mode:
                 self.apply_dark_css()
-                self.print_to_terminal("Modo oscuro ACTIVADO (aplicado ahora y en cargas nuevas)")
-            else:
-                js_remove = "var el = document.getElementById('prekt-dark'); if (el) el.remove();"
-                self.webview.evaluate_javascript(js_remove, -1, None, None, None, None)
-                self.print_to_terminal("Modo oscuro DESACTIVADO")
 
         elif command == "say":
             if args:
@@ -353,9 +404,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 dialog.set_detail("Mensaje de PrekT-BR")
                 dialog.set_buttons(["OK"])
                 dialog.show(self)
-                self.print_to_terminal(f"Mostrando popup: '{args}'")
-            else:
-                self.print_to_terminal("Uso: say [mensaje]")
 
         elif command == "arburarbustribiet":
             dialog = Gtk.AlertDialog()
@@ -366,34 +414,27 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self.print_to_terminal("Arbur Arbustribiet")
 
         elif command == "about":
-            self.print_to_terminal("PrekT-BR :3\nNavegador casero con WebKitGTK 6.0 + terminal matrix lateral\nv1.0")
+            self.print_to_terminal("PrekT-BR :3\nNavegador casero con WebKitGTK + terminal matrix\nv1.7")
 
         elif command in ("clear", "clean"):
             self.clear_terminal()
 
         elif command == "reload":
             self.webview.reload()
-            self.print_to_terminal("Recargando...")
 
         elif command == "back":
             if self.webview.can_go_back():
                 self.webview.go_back()
-                self.print_to_terminal("Atrás")
-            else:
-                self.print_to_terminal("No hay atrás")
 
         elif command == "forward":
             if self.webview.can_go_forward():
                 self.webview.go_forward()
-                self.print_to_terminal("Adelante")
-            else:
-                self.print_to_terminal("No hay adelante")
 
         elif command == "echo":
-            self.print_to_terminal(args if args else "[nada]")
+            if args:
+                self.print_to_terminal(args)
 
         elif command in ("quit", "exit"):
-            self.print_to_terminal("Cerrando PrekT-BR...")
             self.app.quit()
 
         else:
@@ -404,7 +445,8 @@ class BrowserWindow(Gtk.ApplicationWindow):
 
     def on_url_activate(self, entry):
         url = entry.get_text().strip()
-        if not url: return
+        if not url:
+            return
         if not url.startswith(('http://', 'https://', 'file://', 'about:')):
             url = 'https://' + url
         self.webview.load_uri(url)
