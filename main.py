@@ -57,7 +57,7 @@ class PrekTBR(Gtk.Application):
 
 class BrowserWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="PrekT-BR :3")
+        super().__init__(application=app, title="PrekT-BR")
 
         self.app = app
         self.tor_active = False
