@@ -21,6 +21,9 @@ python-gobject
 xdg-desktop-portal
 xdg-desktop-portal-gtk
 gobject-introspection
+tor
+torsocks
+obfs4proxy
 
 ## Funiconalidad de Tor
 
