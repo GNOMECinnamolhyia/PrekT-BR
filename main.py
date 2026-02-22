@@ -414,7 +414,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self.print_to_terminal("Arbur Arbustribiet")
 
         elif command == "about":
-            self.print_to_terminal("PrekT-BR :3\nNavegador casero con WebKitGTK + terminal matrix\nv1.7")
+            self.print_to_terminal("PrekT-BR\nNavegador casero con WebKitGTK + terminal\nv1.0")
 
         elif command in ("clear", "clean"):
             self.clear_terminal()
@@ -461,7 +461,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
 
     def on_title_changed(self, webview, param):
         title = webview.get_title()
-        self.set_title(title if title else "PrekT-BR :3")
+        self.set_title(title if title else "PrekT-BR")
 
 
 def main():
