@@ -25,7 +25,7 @@ tor
 torsocks
 obfs4proxy
 
-## Requisiros (Version de C)
+## Requisitos (Version de C)
 
 base-devel
 gtk4
