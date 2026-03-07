@@ -1,635 +1,1209 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+#
+#  PrekT-BR — Navegador personal basado en WebKitGTK 6
+#  Versión 2.0
+#
 
 import sys
 import os
 import gi
-import urllib.parse
-import datetime
+import json
 import math
 import signal
 import socket
 import threading
+import datetime
+import urllib.parse
 import urllib.request
 
-os.environ["GDK_DEBUG"] = "portals"  # Silencia warnings de portal
+os.environ["GDK_DEBUG"] = "portals"
+os.environ["GTK_A11Y"] = "none"
+# Suprimir warnings de portal en entornos sin sandbox
+os.environ["DBUS_SESSION_BUS_ADDRESS"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('WebKit', '6.0')
 
 from gi.repository import Gtk, WebKit, Gio, GLib, Gdk
 
+# ─── Rutas de datos ──────────────────────────────────────────────────────────
 
-def sigint_handler(app):
-    def handler(sig, frame):
-        app.quit()
-    return handler
+DATA_DIR     = os.path.join(os.path.expanduser("~"), ".local", "share", "prektbr")
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
 
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ─── Persistencia ────────────────────────────────────────────────────────────
+
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def save_json(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[prektbr] Error guardando {path}: {e}")
+
+# ─── CSS global ──────────────────────────────────────────────────────────────
+
+GLOBAL_CSS = """
+/* Barra de herramientas */
+.toolbar {
+    background-color: #1e1e2e;
+    border-bottom: 1px solid #313244;
+    padding: 4px 8px;
+}
+
+/* Entrada de URL */
+.url-entry {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 14px;
+    min-height: 32px;
+}
+.url-entry:focus {
+    border-color: #89b4fa;
+    background-color: #1e1e2e;
+}
+
+/* Botones de navegación */
+.nav-button {
+    background-color: transparent;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-width: 32px;
+    min-height: 32px;
+    font-size: 16px;
+}
+.nav-button:hover {
+    background-color: #313244;
+}
+.nav-button:disabled {
+    color: #45475a;
+}
+
+/* Barra de pestañas */
+.tabbar {
+    background-color: #181825;
+    border-bottom: 1px solid #313244;
+    padding: 4px 8px 0 8px;
+    min-height: 36px;
+}
+
+/* Botón de título dentro de pestaña */
+.tab-title-btn {
+    background-color: transparent;
+    color: inherit;
+    border: none;
+    border-radius: 4px 0 0 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+    min-width: 60px;
+}
+.tab-title-btn:hover {
+    background-color: rgba(255,255,255,0.05);
+}
+
+/* Pestaña normal */
+.tab-btn {
+    background-color: #1e1e2e;
+    color: #6c7086;
+    border: 1px solid #313244;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    padding: 4px 10px;
+    font-size: 13px;
+    min-width: 80px;
+}
+.tab-btn:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+
+/* Pestaña activa */
+.tab-active {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-bottom: 2px solid #89b4fa;
+    font-weight: bold;
+}
+
+/* Indicador de modo de red */
+.badge-normal {
+    background-color: #313244;
+    color: #a6e3a1;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+}
+.badge-tor {
+    background-color: #7f49a0;
+    color: #f5c2e7;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+.badge-i2p {
+    background-color: #1a6b3c;
+    color: #a6e3a1;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+
+.badge-lokinet {
+    background-color: #1a3a6b;
+    color: #89b4fa;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+
+/* Terminal */
+.terminal {
+    background-color: #0d0d0d;
+    color: #00ff41;
+    font-family: monospace;
+    font-size: 13px;
+    padding: 10px;
+    caret-color: #00ff41;
+}
+
+/* Barra de estado */
+.statusbar {
+    background-color: #181825;
+    border-top: 1px solid #313244;
+    color: #6c7086;
+    font-size: 11px;
+    padding: 2px 10px;
+}
+
+/* Botón añadir pestaña */
+.new-tab-btn {
+    background-color: transparent;
+    color: #6c7086;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 18px;
+    min-height: 28px;
+}
+.new-tab-btn:hover {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+
+/* Panel de marcadores / historial */
+.sidebar {
+    background-color: #181825;
+    border-right: 1px solid #313244;
+    min-width: 240px;
+}
+.sidebar-title {
+    background-color: #1e1e2e;
+    color: #89b4fa;
+    font-weight: bold;
+    font-size: 13px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #313244;
+}
+.sidebar-item {
+    background-color: transparent;
+    color: #cdd6f4;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+.sidebar-item:hover {
+    background-color: #313244;
+}
+.close-tab-btn {
+    background-color: transparent;
+    color: #6c7086;
+    border: none;
+    border-radius: 3px;
+    padding: 0 3px;
+    font-size: 12px;
+    min-width: 16px;
+    min-height: 16px;
+}
+.close-tab-btn:hover {
+    background-color: #f38ba8;
+    color: #1e1e2e;
+}
+"""
+
+# ─── Aplicación ──────────────────────────────────────────────────────────────
 
 class PrekTBR(Gtk.Application):
     def __init__(self):
         super().__init__(
-            application_id='com.cinnamolhyia.prektbr',
-            flags=Gio.ApplicationFlags.HANDLES_OPEN
+            application_id="com.cinnamolhyia.prektbr",
+            flags=Gio.ApplicationFlags.HANDLES_OPEN,
         )
         self.home_uri = "file://" + os.path.abspath("newtab.html")
         self.initial_url = self.home_uri
         self.dark_mode = False
-        self.url_history = []  # historial global de URLs visitadas
+
+        # Persistencia
+        self.history   = load_json(HISTORY_FILE,   [])   # [{url, title, ts}]
+        self.bookmarks = load_json(BOOKMARKS_FILE, [])   # [{url, title}]
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(GLOBAL_CSS.encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
     def do_activate(self):
         win = self.props.active_window
         if not win:
             win = BrowserWindow(self)
-            win.set_default_size(1200, 800)
+            win.set_default_size(1280, 800)
         win.present()
 
     def do_open(self, files, n_files, hint):
         win = self.props.active_window
         if not win:
             win = BrowserWindow(self)
-            win.set_default_size(1200, 800)
+            win.set_default_size(1280, 800)
         if files and n_files > 0:
-            win.load_uri(files[0].get_uri())
-        else:
-            win.load_uri(self.home_uri)
+            win.open_tab(uri=files[0].get_uri())
         win.present()
 
+    def add_history(self, url, title=""):
+        if not url or url.startswith("file://") or url == "about:blank":
+            return
+        entry = {"url": url, "title": title or url, "ts": datetime.datetime.now().isoformat()}
+        # Evitar duplicados consecutivos
+        if self.history and self.history[-1]["url"] == url:
+            return
+        self.history.append(entry)
+        # Limitar a 2000 entradas
+        if len(self.history) > 2000:
+            self.history = self.history[-2000:]
+        save_json(HISTORY_FILE, self.history)
+
+    def add_bookmark(self, url, title=""):
+        if not url or url == "about:blank":
+            return False
+        for b in self.bookmarks:
+            if b["url"] == url:
+                return False  # ya existe
+        self.bookmarks.append({"url": url, "title": title or url})
+        save_json(BOOKMARKS_FILE, self.bookmarks)
+        return True
+
+    def remove_bookmark(self, url):
+        self.bookmarks = [b for b in self.bookmarks if b["url"] != url]
+        save_json(BOOKMARKS_FILE, self.bookmarks)
+
+    def is_bookmarked(self, url):
+        return any(b["url"] == url for b in self.bookmarks)
+
+
+# ─── Datos de pestaña ────────────────────────────────────────────────────────
+
+class TabData:
+    def __init__(self, webview, mode="normal"):
+        self.webview = webview
+        self.mode = mode   # "normal" | "tor" | "i2p"
+
+
+# ─── Ventana principal ───────────────────────────────────────────────────────
 
 class BrowserWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="PrekT-BR")
-
         self.app = app
-        self.tor_active = False
+        self.tabs: list[TabData] = []
+        self.current_tab = -1
+        self._sidebar_mode = None   # None | "bookmarks" | "history"
 
-        # --- Sistema de 3 pestañas ---
-        # Cada pestaña tiene su propio WebView y estado tor
-        self.tabs = []       # lista de dicts: {webview, tor_active}
-        self.current_tab = 0
+        self._build_ui()
+        self.open_tab(uri=self.app.initial_url)
 
-        for i in range(3):
-            wv = self._create_webview(tor=False)
-            wv.load_uri(self.app.home_uri)
-            self.tabs.append({"webview": wv, "tor_active": False})
+    # ── Construcción de la interfaz ──────────────────────────────────────────
 
-        # La pestaña activa se accede con self._wv() — ver método más abajo
+    def _build_ui(self):
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
-        self.settings = self.tabs[0]["webview"].get_settings()
+        # Barra de pestañas
+        self.tabbar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        self.tabbar_box.add_css_class("tabbar")
 
-        # --- CSS ---
-        provider = Gtk.CssProvider()
-        css = b"""
-        .matrix-terminal {
-            background-color: #000000;
-            color: #00FF00;
-            font-family: monospace;
-            font-size: 14px;
-            padding: 8px;
-            caret-color: #00FF00;
-        }
-        .tab-active {
-            background: #444;
-            color: #fff;
-            font-weight: bold;
-        }
-        """
-        provider.load_from_data(css)
-        display = self.get_display()
-        Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        new_tab_btn = Gtk.Button(label="+")
+        new_tab_btn.add_css_class("new-tab-btn")
+        new_tab_btn.set_tooltip_text("Nueva pestaña")
+        new_tab_btn.connect("clicked", lambda _: self.open_tab())
 
-        # --- Barra de pestañas ---
-        self.tab_buttons = []
-        tab_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        tab_bar.set_margin_start(12)
-        tab_bar.set_margin_top(4)
-        for i in range(3):
-            btn = Gtk.Button(label=f" Tab {i+1} ")
-            btn.connect('clicked', self._on_tab_clicked, i)
-            self.tab_buttons.append(btn)
-            tab_bar.append(btn)
-        self.tab_buttons[0].add_css_class("tab-active")
+        tabbar_scroll = Gtk.ScrolledWindow()
+        tabbar_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        tabbar_scroll.set_hexpand(True)
+        tabbar_scroll.set_child(self.tabbar_box)
+        tabbar_scroll.set_min_content_height(38)
 
-        # --- Barra de navegación ---
+        tabbar_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        tabbar_row.add_css_class("tabbar")
+        tabbar_row.append(tabbar_scroll)
+        tabbar_row.append(new_tab_btn)
+
+        # Barra de navegación
+        self.back_btn    = self._nav_btn("Atras",    "Atras",            self._on_back)
+        self.forward_btn = self._nav_btn("Adelante", "Adelante",         self._on_forward)
+        self.reload_btn  = self._nav_btn("Recargar", "Recargar",         self._on_reload)
+        self.home_btn    = self._nav_btn("Inicio",   "Ir al inicio",     self._on_home)
+        self.bookmark_star = self._nav_btn("Marcar", "Guardar marcador", self._on_toggle_bookmark)
+
         self.url_entry = Gtk.Entry()
-        self.url_entry.set_text(self.app.initial_url)
         self.url_entry.set_hexpand(True)
-        self.url_entry.connect('activate', self.on_url_activate)
+        self.url_entry.add_css_class("url-entry")
+        self.url_entry.set_placeholder_text("Ingresa una URL o busca en DuckDuckGo...")
+        self.url_entry.connect("activate", self._on_url_activate)
 
-        go_button = Gtk.Button(label="Ir")
-        go_button.connect('clicked', self.on_go_clicked)
+        self.badge = Gtk.Label(label="")
+        self.badge.add_css_class("badge-normal")
+        self.badge.set_tooltip_text("Modo de red actual")
+        self.badge.set_visible(False)
 
-        back_button = Gtk.Button(label=" ← ")
-        back_button.connect('clicked', lambda b: self._wv().go_back() if self._wv().can_go_back() else None)
+        bmarks_btn = self._nav_btn("Marcadores", "Marcadores", lambda _: self._toggle_sidebar("bookmarks"))
+        history_btn = self._nav_btn("Historial", "Historial", lambda _: self._toggle_sidebar("history"))
+        terminal_btn = self._nav_btn("Terminal", "Terminal", self._on_toggle_terminal)
 
-        forward_button = Gtk.Button(label=" → ")
-        forward_button.connect('clicked', lambda b: self._wv().go_forward() if self._wv().can_go_forward() else None)
+        nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        nav_box.add_css_class("toolbar")
+        for w in [self.back_btn, self.forward_btn, self.reload_btn, self.home_btn,
+                  self.url_entry, self.bookmark_star, self.badge,
+                  bmarks_btn, history_btn, terminal_btn]:
+            nav_box.append(w)
 
-        reload_button = Gtk.Button(label=" ↻ ")
-        reload_button.connect('clicked', lambda b: self._wv().reload())
+        # Área de contenido (sidebar + webview stack + terminal)
+        self.content_area = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.content_area.set_vexpand(True)
+        self.content_area.set_hexpand(True)
 
-        home_button = Gtk.Button(label="Home")
-        home_button.connect('clicked', self.on_home_clicked)
+        self.sidebar_widget = None  # se crea dinámicamente
 
-        self.terminal_button = Gtk.Button(label="Terminal")
-        self.terminal_button.connect('clicked', self.on_toggle_terminal)
-
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header.set_margin_top(6)
-        header.set_margin_bottom(6)
-        header.set_margin_start(12)
-        header.set_margin_end(12)
-
-        header.append(back_button)
-        header.append(forward_button)
-        header.append(reload_button)
-        header.append(home_button)
-        header.append(self.terminal_button)
-        header.append(self.url_entry)
-        header.append(go_button)
-
-        # --- Terminal ---
-        self.terminal_buffer = Gtk.TextBuffer()
-        self.terminal_view = Gtk.TextView(buffer=self.terminal_buffer)
-        self.terminal_view.set_editable(True)
-        self.terminal_view.set_cursor_visible(True)
-        self.terminal_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self.terminal_view.set_monospace(True)
-        self.terminal_view.add_css_class("matrix-terminal")
-
-        self.scroll_terminal = Gtk.ScrolledWindow()
-        self.scroll_terminal.set_vexpand(True)
-        self.scroll_terminal.set_hexpand(True)
-        self.scroll_terminal.set_min_content_width(300)
-        self.scroll_terminal.set_child(self.terminal_view)
-
-        key_controller = Gtk.EventControllerKey()
-        key_controller.connect('key-pressed', self.on_terminal_key_pressed)
-        self.terminal_view.add_controller(key_controller)
-
-        # --- Stack para las 3 pestañas ---
+        # Stack de pestañas
         self.tab_stack = Gtk.Stack()
         self.tab_stack.set_vexpand(True)
         self.tab_stack.set_hexpand(True)
-        for i, tab in enumerate(self.tabs):
-            self.tab_stack.add_named(tab["webview"], f"tab{i}")
-        self.tab_stack.set_visible_child_name("tab0")
+        self.content_area.append(self.tab_stack)
 
-        self.content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        self.content_box.set_vexpand(True)
-        self.content_box.set_hexpand(True)
-        self.content_box.append(self.tab_stack)
-
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        main_box.append(tab_bar)
-        main_box.append(header)
-        main_box.append(self.content_box)
-
-        self.set_child(main_box)
-
-        self.print_to_terminal("PrekT-BR terminal\nFUNCIONES: 'help' para ver todos los comandos\n")
-        self.print_prompt()
-
+        # Terminal
         self.terminal_visible = False
+        self.terminal_buf = Gtk.TextBuffer()
+        self.terminal_tv  = Gtk.TextView(buffer=self.terminal_buf)
+        self.terminal_tv.set_editable(True)
+        self.terminal_tv.set_cursor_visible(True)
+        self.terminal_tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.terminal_tv.set_monospace(True)
+        self.terminal_tv.add_css_class("terminal")
+        self.terminal_tv.set_size_request(340, 200)
 
-    def _wv(self):
-        """Devuelve el WebView de la pestaña activa."""
-        return self.tabs[self.current_tab]["webview"]
+        term_scroll = Gtk.ScrolledWindow()
+        term_scroll.set_vexpand(True)
+        term_scroll.set_hexpand(False)
+        term_scroll.set_min_content_width(340)
+        term_scroll.set_min_content_height(200)
+        term_scroll.set_child(self.terminal_tv)
+        self._term_scroll = term_scroll
 
-    def _on_tab_clicked(self, button, index):
-        """Cambia a la pestaña indicada."""
-        # Quitar estilo activo de todas
-        for btn in self.tab_buttons:
-            btn.remove_css_class("tab-active")
-        self.current_tab = index
-        self.tab_buttons[index].add_css_class("tab-active")
-        self.tab_stack.set_visible_child_name(f"tab{index}")
-        # Actualizar URL entry con la URL de la nueva pestaña
-        uri = self._wv().get_uri()
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self._on_terminal_key)
+        self.terminal_tv.add_controller(key_ctrl)
+
+        # Barra de estado
+        self.statusbar = Gtk.Label(label="")
+        self.statusbar.add_css_class("statusbar")
+        self.statusbar.set_halign(Gtk.Align.START)
+        self.statusbar.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
+
+        root.append(tabbar_row)
+        root.append(nav_box)
+        root.append(self.content_area)
+        root.append(self.statusbar)
+        self.set_child(root)
+
+        self._term_print("PrekT-BR v2.0  —  escribe 'help' para ver los comandos")
+        self._term_prompt()
+
+    def _nav_btn(self, label, tooltip, callback):
+        b = Gtk.Button(label=label)
+        b.add_css_class("nav-button")
+        b.set_tooltip_text(tooltip)
+        b.connect("clicked", callback)
+        return b
+
+    # ── Gestión de pestañas ──────────────────────────────────────────────────
+
+    def _make_tab_widget(self, idx):
+        """Crea el widget de pestaña: un Box con botón de título + botón cerrar, sin anidar."""
+        tab_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        tab_box.add_css_class("tab-btn")
+
+        title_btn = Gtk.Button(label=f"Tab {idx+1}")
+        title_btn.add_css_class("tab-title-btn")
+        title_btn.set_hexpand(True)
+        title_btn.connect("clicked", lambda b, i=idx: self._on_tab_click(i))
+
+        close_btn = Gtk.Button(label="x")
+        close_btn.add_css_class("close-tab-btn")
+        close_btn.connect("clicked", lambda b, i=idx: self._on_close_tab(i))
+
+        tab_box.append(title_btn)
+        tab_box.append(close_btn)
+
+        # Guardar referencia para actualizar el título después
+        tab_box._title_btn = title_btn
+        tab_box._tab_idx = idx
+        return tab_box
+
+    def open_tab(self, uri=None, mode="normal"):
+        wv = self._make_webview(mode)
+        td = TabData(wv, mode)
+        self.tabs.append(td)
+        idx = len(self.tabs) - 1
+
+        self.tab_stack.add_named(wv, f"tab{idx}")
+
+        tab_widget = self._make_tab_widget(idx)
+        self.tabbar_box.append(tab_widget)
+
+        self._switch_tab(idx)
+        wv.load_uri(uri or self.app.home_uri)
+
+    def _on_close_tab(self, idx):
+        if len(self.tabs) == 1:
+            self.tabs[0].webview.load_uri(self.app.home_uri)
+            return
+        td = self.tabs[idx]
+        self.tab_stack.remove(td.webview)
+        self.tabs.pop(idx)
+        self._rebuild_tabbar()
+        new_idx = min(idx, len(self.tabs) - 1)
+        self._switch_tab(new_idx)
+
+    def _rebuild_tabbar(self):
+        child = self.tabbar_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.tabbar_box.remove(child)
+            child = nxt
+        for i, td in enumerate(self.tabs):
+            tab_widget = self._make_tab_widget(i)
+            # Restaurar título
+            title = td.webview.get_title()
+            if title:
+                short = (title[:14] + "...") if len(title) > 14 else title
+                tab_widget._title_btn.set_label(short)
+            self.tabbar_box.append(tab_widget)
+
+    def _on_tab_click(self, idx):
+        self._switch_tab(idx)
+
+    def _switch_tab(self, idx):
+        if idx < 0 or idx >= len(self.tabs):
+            return
+        # Actualizar estilos — los widgets en tabbar_box son Box ahora
+        child = self.tabbar_box.get_first_child()
+        i = 0
+        while child:
+            child.remove_css_class("tab-active")
+            if i == idx:
+                child.add_css_class("tab-active")
+            child = child.get_next_sibling()
+            i += 1
+
+        self.current_tab = idx
+        self.tab_stack.set_visible_child_name(f"tab{idx}")
+
+        td = self.tabs[idx]
+        uri = td.webview.get_uri()
         if uri and uri != "about:blank":
             self.url_entry.set_text(uri)
         else:
-            self.url_entry.set_text(self.app.home_uri)
-        # Actualizar título
-        title = self._wv().get_title()
-        self.set_title(f"[Tab {index+1}] {title}" if title else f"PrekT-BR — Tab {index+1}")
+            self.url_entry.set_text("")
 
-    def _update_tab_label(self):
-        """Actualiza el label del botón de pestaña activa con el título de la página."""
-        title = self._wv().get_title()
-        short = (title[:12] + "…") if title and len(title) > 12 else (title or f"Tab {self.current_tab+1}")
-        self.tab_buttons[self.current_tab].set_label(f" {short} ")
+        self._update_badge(td.mode)
+        self._update_nav_buttons()
+        self._update_bookmark_star()
 
-    def _create_webview(self, tor=False):
-        """Crea un WebView nuevo, con o sin proxy Tor."""
-        if tor:
-            try:
-                network_session = WebKit.NetworkSession.new_ephemeral()
-                proxy_settings = WebKit.NetworkProxySettings.new(
-                    "socks5://127.0.0.1:9050", None
-                )
-                network_session.set_proxy_settings(
-                    WebKit.NetworkProxyMode.CUSTOM, proxy_settings
-                )
-                webview = WebKit.WebView(network_session=network_session)
-            except Exception:
-                os.environ["SOCKS_PROXY"] = "socks5://127.0.0.1:9050"
-                webview = WebKit.WebView()
+    def _wv(self) -> WebKit.WebView:
+        return self.tabs[self.current_tab].webview
 
-            settings = WebKit.Settings.new()
-            settings.set_enable_webrtc(False)
-            settings.set_enable_mediasource(False)
-            settings.set_enable_encrypted_media(False)
-            settings.set_user_agent(
+    def _td(self) -> TabData:
+        return self.tabs[self.current_tab]
+
+    # ── Creación de WebView ──────────────────────────────────────────────────
+
+    def _make_webview(self, mode="normal") -> WebKit.WebView:
+        proxy_url = None
+        if mode == "tor":
+            proxy_url = "socks5://127.0.0.1:9050"
+        elif mode == "i2p":
+            proxy_url = "http://127.0.0.1:4444"
+        elif mode == "lokinet":
+            proxy_url = "socks5://127.0.0.1:1080"
+
+        if proxy_url:
+            ns = WebKit.NetworkSession.new_ephemeral()
+            ps = WebKit.NetworkProxySettings.new(proxy_url, None)
+            ns.set_proxy_settings(WebKit.NetworkProxyMode.CUSTOM, ps)
+            wv = WebKit.WebView(network_session=ns)
+        else:
+            wv = WebKit.WebView()
+
+        s = WebKit.Settings.new()
+        s.set_enable_developer_extras(True)
+        s.set_javascript_can_access_clipboard(False)
+        if mode in ("tor", "i2p", "lokinet"):
+            s.set_enable_webrtc(False)
+            s.set_enable_mediasource(False)
+            s.set_enable_encrypted_media(False)
+            s.set_user_agent(
                 "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
             )
-            webview.set_settings(settings)
+        wv.set_settings(s)
+        wv.set_vexpand(True)
+        wv.set_hexpand(True)
+
+        wv.connect("notify::uri",   self._on_uri_changed)
+        wv.connect("notify::title", self._on_title_changed)
+        wv.connect("load-changed",  self._on_load_changed)
+        wv.connect("notify::estimated-load-progress", self._on_progress)
+        return wv
+
+    # ── Señales del WebView ──────────────────────────────────────────────────
+
+    def _on_uri_changed(self, wv, _param):
+        if not self.tabs:
+            return
+        uri = wv.get_uri()
+        if not uri or uri == "about:blank":
+            return
+        if wv is self._wv():
+            self.url_entry.set_text(uri)
+            self._update_bookmark_star()
+            self._update_nav_buttons()
+        title = wv.get_title() or uri
+        self.app.add_history(uri, title)
+
+    def _on_title_changed(self, wv, _param):
+        if not self.tabs:
+            return
+        title = wv.get_title() or ""
+        child = self.tabbar_box.get_first_child()
+        i = 0
+        while child:
+            if i < len(self.tabs) and self.tabs[i].webview is wv:
+                if hasattr(child, "_title_btn"):
+                    short = (title[:14] + "...") if len(title) > 14 else (title or f"Tab {i+1}")
+                    child._title_btn.set_label(short)
+                break
+            child = child.get_next_sibling()
+            i += 1
+        if wv is self._wv():
+            self.set_title(f"PrekT-BR — {title}" if title else "PrekT-BR")
+
+    def _on_load_changed(self, wv, event):
+        if event == WebKit.LoadEvent.STARTED:
+            self.reload_btn.set_label("Detener")
+            self.reload_btn.set_tooltip_text("Detener carga")
+        elif event == WebKit.LoadEvent.FINISHED:
+            self.reload_btn.set_label("Recargar")
+            self.reload_btn.set_tooltip_text("Recargar")
+            self.statusbar.set_label("")
+            if self.app.dark_mode and wv is self._wv():
+                GLib.timeout_add(400, self._apply_dark_css)
+
+    def _on_progress(self, wv, _param):
+        if wv is not self._wv():
+            return
+        p = wv.get_estimated_load_progress()
+        if 0 < p < 1:
+            self.statusbar.set_label(f"Cargando… {int(p*100)}%")
         else:
-            webview = WebKit.WebView()
+            self.statusbar.set_label("")
 
-        webview.set_vexpand(True)
-        webview.set_hexpand(True)
+    # ── Navegación ───────────────────────────────────────────────────────────
 
-        webview.connect('notify::uri', self.on_uri_changed)
-        webview.connect('notify::title', self.on_title_changed)
-        webview.connect('load-changed', self.on_load_changed)
+    def _on_back(self, _):
+        if self._wv().can_go_back():
+            self._wv().go_back()
 
-        return webview
+    def _on_forward(self, _):
+        if self._wv().can_go_forward():
+            self._wv().go_forward()
 
-    def _swap_webview_in_tab(self, tab_index, new_webview, load_uri=None):
-        """Reemplaza el WebView de una pestaña específica."""
-        old_wv = self.tabs[tab_index]["webview"]
-        current_uri = old_wv.get_uri()
-        self.tab_stack.remove(old_wv)
-        self.tabs[tab_index]["webview"] = new_webview
-        self.tab_stack.add_named(new_webview, f"tab{tab_index}")
-        if tab_index == self.current_tab:
-            self.tab_stack.set_visible_child_name(f"tab{tab_index}")
-        uri_to_load = load_uri or current_uri
-        if uri_to_load and uri_to_load != "about:blank":
-            new_webview.load_uri(uri_to_load)
+    def _on_reload(self, _):
+        wv = self._wv()
+        if wv.is_loading():
+            wv.stop_loading()
         else:
-            new_webview.load_uri(self.app.home_uri)
+            wv.reload()
 
-    def print_prompt(self):
-        self.print_to_terminal("> ", no_newline=True)
+    def _on_home(self, _):
+        self._wv().load_uri(self.app.home_uri)
 
-    def print_to_terminal(self, text, no_newline=False):
-        end_iter = self.terminal_buffer.get_end_iter()
-        if no_newline:
-            self.terminal_buffer.insert(end_iter, text)
+    def _on_url_activate(self, entry):
+        text = entry.get_text().strip()
+        if not text:
+            return
+        url = self._resolve_input(text)
+        self._wv().load_uri(url)
+
+    def _resolve_input(self, text):
+        if text.startswith(("http://", "https://", "file://", "about:")):
+            return text
+        # Si parece dominio (tiene punto y sin espacios)
+        if "." in text and " " not in text:
+            return "https://" + text
+        # Buscar en DuckDuckGo
+        q = urllib.parse.quote(text)
+        return f"https://duckduckgo.com/?q={q}"
+
+    def _update_nav_buttons(self):
+        if not self.tabs:
+            return
+        self.back_btn.set_sensitive(self._wv().can_go_back())
+        self.forward_btn.set_sensitive(self._wv().can_go_forward())
+
+    # ── Marcadores ───────────────────────────────────────────────────────────
+
+    def _on_toggle_bookmark(self, _):
+        wv = self._wv()
+        uri = wv.get_uri()
+        if not uri or uri == "about:blank":
+            return
+        if self.app.is_bookmarked(uri):
+            self.app.remove_bookmark(uri)
+            self.bookmark_star.set_label("Marcar")
+            self.statusbar.set_label("Marcador eliminado")
         else:
-            self.terminal_buffer.insert(end_iter, text + "\n")
-        self.terminal_view.scroll_to_iter(end_iter, 0.0, True, 0.0, 1.0)
+            title = wv.get_title() or uri
+            self.app.add_bookmark(uri, title)
+            self.bookmark_star.set_label("[Marcado]")
+            self.statusbar.set_label("Marcador guardado")
+        GLib.timeout_add(2000, lambda: self.statusbar.set_label("") or False)
+        # Refrescar sidebar si está abierto
+        if self._sidebar_mode == "bookmarks":
+            self._show_sidebar("bookmarks")
 
-    def clear_terminal(self):
-        self.terminal_buffer.set_text("")
-        self.print_prompt()
+    def _update_bookmark_star(self):
+        if not self.tabs:
+            return
+        uri = self._wv().get_uri()
+        self.bookmark_star.set_label("[Marcado]" if self.app.is_bookmarked(uri or "") else "Marcar")
 
-    def on_toggle_terminal(self, button):
-        if self.terminal_visible:
-            self.content_box.remove(self.scroll_terminal)
-            self.terminal_visible = False
+    # ── Sidebar (marcadores / historial) ─────────────────────────────────────
+
+    def _toggle_sidebar(self, mode):
+        if self._sidebar_mode == mode:
+            self._close_sidebar()
         else:
-            self.content_box.append(self.scroll_terminal)
-            self.terminal_visible = True
-            self.terminal_view.grab_focus()
+            self._show_sidebar(mode)
 
-    def on_terminal_key_pressed(self, controller, keyval, keycode, state):
-        if keyval == Gdk.KEY_Return or keyval == Gdk.KEY_KP_Enter:
-            start = self.terminal_buffer.get_start_iter()
-            end = self.terminal_buffer.get_end_iter()
-            full_text = self.terminal_buffer.get_text(start, end, False).rstrip()
-            lines = full_text.split('\n')
-            if lines:
-                last_line = lines[-1].strip()
-                if last_line.startswith("> "):
-                    command = last_line[2:].strip()
-                    if command:
-                        self.print_to_terminal("")
-                        self.process_command(command)
-                        self.print_to_terminal("")
-            self.print_prompt()
-            return True
-        return False
+    def _close_sidebar(self):
+        if self.sidebar_widget:
+            self.content_area.remove(self.sidebar_widget)
+            self.sidebar_widget = None
+        self._sidebar_mode = None
 
-    def safe_eval(self, expr):
-        allowed_names = {"__builtins__": {}, "math": math}
-        try:
-            result = eval(expr, allowed_names, {})
-            return str(result)
-        except Exception as e:
-            return f"Error: {str(e)}"
+    def _show_sidebar(self, mode):
+        self._close_sidebar()
+        self._sidebar_mode = mode
 
-    def on_load_changed(self, webview, load_event):
-        if load_event == WebKit.LoadEvent.FINISHED and self.app.dark_mode:
-            GLib.timeout_add(600, self.apply_dark_css)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        outer.add_css_class("sidebar")
 
-    def apply_dark_css(self):
-        css_dark = """
+        # Cabecera del panel
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        title_box.add_css_class("sidebar-title")
+        lbl = Gtk.Label(label="Marcadores" if mode == "bookmarks" else "Historial")
+        lbl.set_hexpand(True)
+        lbl.set_halign(Gtk.Align.START)
+        close_btn = Gtk.Button(label="Cerrar")
+        close_btn.add_css_class("nav-button")
+        close_btn.connect("clicked", lambda _: self._close_sidebar())
+        title_box.append(lbl)
+        title_box.append(close_btn)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        list_box.set_margin_top(4)
+        list_box.set_margin_bottom(4)
+        list_box.set_margin_start(4)
+        list_box.set_margin_end(4)
+
+        if mode == "bookmarks":
+            items = self.app.bookmarks[:]
+            if not items:
+                empty = Gtk.Label(label="Sin marcadores aún")
+                empty.set_margin_top(20)
+                empty.add_css_class("sidebar-item")
+                list_box.append(empty)
+            for b in items:
+                self._sidebar_item(list_box, b["title"], b["url"], removable=True)
+        else:
+            items = list(reversed(self.app.history[-200:]))
+            if not items:
+                empty = Gtk.Label(label="El historial está vacío")
+                empty.set_margin_top(20)
+                empty.add_css_class("sidebar-item")
+                list_box.append(empty)
+            for h in items:
+                ts = h.get("ts", "")[:10]
+                label = f"[{ts}] {h.get('title', h['url'])}"
+                self._sidebar_item(list_box, label, h["url"])
+
+        scroll.set_child(list_box)
+        outer.append(title_box)
+        outer.append(scroll)
+
+        # Insertar ANTES del stack
+        self.content_area.prepend(outer)
+        self.sidebar_widget = outer
+
+    def _sidebar_item(self, box, label, url, removable=False):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        btn = Gtk.Button(label=label)
+        btn.add_css_class("sidebar-item")
+        btn.set_hexpand(True)
+        btn.set_halign(Gtk.Align.FILL)
+        btn.connect("clicked", lambda _, u=url: self._wv().load_uri(u))
+        row.append(btn)
+        if removable:
+            del_btn = Gtk.Button(label="Quitar")
+            del_btn.add_css_class("close-tab-btn")
+            del_btn.connect("clicked", lambda _, u=url: (
+                self.app.remove_bookmark(u),
+                self._show_sidebar("bookmarks")
+            ))
+            row.append(del_btn)
+        box.append(row)
+
+    # ── Badge de modo red ─────────────────────────────────────────────────────
+
+    def _update_badge(self, mode):
+        self.badge.remove_css_class("badge-normal")
+        self.badge.remove_css_class("badge-tor")
+        self.badge.remove_css_class("badge-i2p")
+        self.badge.remove_css_class("badge-lokinet")
+        if mode == "tor":
+            self.badge.set_label("TOR")
+            self.badge.add_css_class("badge-tor")
+            self.badge.set_visible(True)
+        elif mode == "i2p":
+            self.badge.set_label("I2P")
+            self.badge.add_css_class("badge-i2p")
+            self.badge.set_visible(True)
+        elif mode == "lokinet":
+            self.badge.set_label("LOKINET")
+            self.badge.add_css_class("badge-lokinet")
+            self.badge.set_visible(True)
+        else:
+            self.badge.set_label("")
+            self.badge.set_visible(False)
+
+    # ── Modo oscuro ──────────────────────────────────────────────────────────
+
+    def _apply_dark_css(self):
+        css = """
         :root { color-scheme: dark !important; }
-        * { background: #111 !important; color: #eee !important; border-color: #333 !important; }
-        a { color: #8cf !important; }
+        * { background-color: #111 !important; color: #eee !important;
+            border-color: #333 !important; }
+        a { color: #8ab4f8 !important; }
+        img { filter: brightness(0.85); }
         """
-        js = f"""
-        (function() {{
-            let style = document.getElementById('prekt-dark');
-            if (!style) {{
-                style = document.createElement('style');
-                style.id = 'prekt-dark';
-                style.textContent = `{css_dark}`;
-                document.head.appendChild(style);
-            }}
-        }})();
-        """
+        js = f"""(function(){{
+            let el = document.getElementById('prektbr-dark');
+            if(!el){{el=document.createElement('style');el.id='prektbr-dark';
+            document.head.appendChild(el);}} el.textContent=`{css}`;
+        }})();"""
         self._wv().evaluate_javascript(js, -1, None, None, None, None)
         return False
 
-    def enable_tor_mode(self):
-        tab = self.tabs[self.current_tab]
-        if tab["tor_active"]:
-            self.print_to_terminal(f"La Tab {self.current_tab+1} ya tiene Tor activo.")
+    # ── Tor / I2P ────────────────────────────────────────────────────────────
+
+    def _enable_network_mode(self, mode):
+        td = self._td()
+        if td.mode == mode:
+            self._term_print(f"La pestaña ya está en modo {mode.upper()}.")
+            self._term_prompt()
             return
-        try:
-            os.environ["SOCKS5_SERVER"] = "127.0.0.1:9050"
-            os.environ["SOCKS_PROXY"] = "socks5://127.0.0.1:9050"
-            new_webview = self._create_webview(tor=True)
-            self._swap_webview_in_tab(self.current_tab, new_webview)
-            tab["tor_active"] = True
-            self.tor_active = True  # para compatibilidad con apply_dark_css etc.
-            self.print_to_terminal(f"  MODO TOR ACTIVADO EN TAB {self.current_tab+1}")
-            self.print_to_terminal("  WebRTC DESACTIVADO.")
-            self.print_to_terminal("  TEN CUIDADO.")
-            self.print_to_terminal("  QUITA LA S DE LOS HTTPS:// EN SITIOS .ONION.")
-        except Exception as e:
-            self.print_to_terminal(f"Error al activar Tor: {str(e)}")
+        old_uri = td.webview.get_uri() or self.app.home_uri
+        new_wv = self._make_webview(mode)
+        idx = self.current_tab
 
-    def disable_tor_mode(self):
-        tab = self.tabs[self.current_tab]
-        if not tab["tor_active"]:
-            self.print_to_terminal(f"La Tab {self.current_tab+1} no tiene Tor activo.")
+        self.tab_stack.remove(td.webview)
+        td.webview = new_wv
+        td.mode = mode
+        self.tab_stack.add_named(new_wv, f"tab{idx}")
+        self.tab_stack.set_visible_child_name(f"tab{idx}")
+        new_wv.load_uri(old_uri if old_uri != "about:blank" else self.app.home_uri)
+        self._update_badge(mode)
+
+        if mode == "tor":
+            self._term_print("  MODO TOR ACTIVADO — WebRTC deshabilitado")
+            self._term_print("  Usa http:// (sin s) para sitios .onion")
+        elif mode == "i2p":
+            self._term_print("  MODO I2P ACTIVADO — Proxy HTTP 127.0.0.1:4444")
+            self._term_print("  Navega a sitios .i2p normalmente")
+        elif mode == "lokinet":
+            self._term_print("  MODO LOKINET ACTIVADO — Proxy SOCKS5 127.0.0.1:1080")
+            self._term_print("  Navega a sitios .loki normalmente")
+        self._term_prompt()
+
+    def _disable_network_mode(self):
+        td = self._td()
+        if td.mode == "normal":
+            self._term_print("La pestaña ya está en modo normal.")
+            self._term_prompt()
             return
-        try:
-            new_webview = self._create_webview(tor=False)
-            self._swap_webview_in_tab(self.current_tab, new_webview)
-            tab["tor_active"] = False
-            # Actualizar self.tor_active global
-            self.tor_active = any(t["tor_active"] for t in self.tabs)
-            self.print_to_terminal(f"  MODO TOR DESACTIVADO EN TAB {self.current_tab+1}")
-            self.print_to_terminal("  Volviendo a sesión normal.")
-        except Exception as e:
-            self.print_to_terminal(f"Error al desactivar Tor: {str(e)}")
+        old_uri = td.webview.get_uri() or self.app.home_uri
+        new_wv = self._make_webview("normal")
+        idx = self.current_tab
 
-    def process_command(self, cmd):
-        parts = cmd.split(maxsplit=1)
-        command = parts[0].lower() if parts else ""
-        args = parts[1].strip() if len(parts) > 1 else ""
+        self.tab_stack.remove(td.webview)
+        td.webview = new_wv
+        td.mode = "normal"
+        self.tab_stack.add_named(new_wv, f"tab{idx}")
+        self.tab_stack.set_visible_child_name(f"tab{idx}")
+        new_wv.load_uri(old_uri if old_uri != "about:blank" else self.app.home_uri)
+        self._update_badge("normal")
+        self._term_print("  Modo normal restaurado.")
+        self._term_prompt()
 
-        if command == "help":
-            self.print_to_terminal(
-                "Comandos disponibles:\n"
-                "  help                      → esta lista\n"
-                "  home                      → va a newtab.html\n"
-                "  google algo               → busca en Google\n"
-                "  yt video                  → busca en YouTube\n"
-                "  wiki algo                 → Wikipedia (es)\n"
-                "  cat                       → imágenes de gatos\n"
-                "  calc 2+3*4                → evalúa matemática\n"
-                "  time                      → hora actual\n"
-                "  date                      → fecha actual\n"
-                "  duckduckgo [algo]         → abre DDG\n"
-                "  new https://...           → abre URL\n"
-                "  dark                      → toggle modo oscuro\n"
-                "  say hola                  → popup\n"
-                "  clear / clean             → limpia terminal\n"
-                "  about                     → info del navegador\n"
-                "  reload                    → recarga página\n"
-                "  back                      → atrás\n"
-                "  forward                   → adelante\n"
-                "  echo algo                 → repite texto\n"
-                "  quit / exit               → cierra el navegador\n"
-                "  arburarbustribiet         → Arbur Arbustribiet!!!\n"
-                "  tormode                   → activa Tor en la pestaña activa\n"
-                "  untor                     → desactiva Tor en la pestaña activa\n"
-                "  whoami                    → tu IP pública (funciona siempre)\n"
-                "  serverip                  → IPs de los servidores de las 3 pestañas\n"
-                "  historyten                → últimas 10 páginas visitadas\n"
+    # ── Terminal ─────────────────────────────────────────────────────────────
+
+    def _on_toggle_terminal(self, _):
+        if self.terminal_visible:
+            self.content_area.remove(self._term_scroll)
+            self.terminal_visible = False
+        else:
+            self.content_area.append(self._term_scroll)
+            self.terminal_visible = True
+            self.terminal_tv.grab_focus()
+
+    def _term_print(self, text, no_nl=False):
+        end = self.terminal_buf.get_end_iter()
+        self.terminal_buf.insert(end, text if no_nl else text + "\n")
+        self.terminal_tv.scroll_to_iter(end, 0.0, True, 0.0, 1.0)
+
+    def _term_prompt(self):
+        self._term_print("> ", no_nl=True)
+
+    def _on_terminal_key(self, ctrl, keyval, keycode, state):
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            start = self.terminal_buf.get_start_iter()
+            end   = self.terminal_buf.get_end_iter()
+            full  = self.terminal_buf.get_text(start, end, False).rstrip()
+            lines = full.split("\n")
+            if lines:
+                last = lines[-1].strip()
+                if last.startswith("> "):
+                    cmd = last[2:].strip()
+                    if cmd:
+                        self._term_print("")
+                        self._run_command(cmd)
+                        return True
+            self._term_print("")
+            self._term_prompt()
+            return True
+        return False
+
+    # ── Comandos de terminal ──────────────────────────────────────────────────
+
+    def _run_command(self, raw):
+        parts   = raw.split(maxsplit=1)
+        cmd     = parts[0].lower() if parts else ""
+        args    = parts[1].strip() if len(parts) > 1 else ""
+
+        def nav(url):
+            self._wv().load_uri(url)
+
+        if cmd == "help":
+            self._term_print(
+                "─── Navegación ───────────────────────────────\n"
+                "  open <url>            → abre URL en pestaña actual\n"
+                "  newtab [url]          → abre nueva pestaña\n"
+                "  closetab              → cierra pestaña actual\n"
+                "  tab <n>               → cambia a pestaña n (1-based)\n"
+                "  back / forward        → historial del navegador\n"
+                "  reload                → recarga\n"
+                "  home                  → página de inicio\n"
+                "─── Búsqueda ─────────────────────────────────\n"
+                "  ddg <consulta>        → DuckDuckGo\n"
+                "  google <consulta>     → Google\n"
+                "  yt <consulta>         → YouTube\n"
+                "  wiki <consulta>       → Wikipedia (es)\n"
+                "─── Redes alternativas ───────────────────────\n"
+                "  tormode               → activa Tor en esta pestaña\n"
+                "  i2pmode               → activa I2P en esta pestaña\n"
+                "  clearnet              → vuelve a modo normal\n"
+                "  loki <direccion>      → abre direccion.loki (requiere lokinet.service)\n"
+                "  whoami                → tu IP pública\n"
+                "  serverip              → IP del servidor actual\n"
+                "─── Marcadores e historial ───────────────────\n"
+                "  bookmark              → guarda/quita marcador actual\n"
+                "  bookmarks             → lista marcadores\n"
+                "  history [n]           → últimas n URLs (def. 10)\n"
+                "─── Utilidades ───────────────────────────────\n"
+                "  dark                  → toggle modo oscuro\n"
+                "  calc <expr>           → calculadora\n"
+                "  time / date           → hora / fecha\n"
+                "  echo <texto>          → repite texto\n"
+                "  clear                 → limpia terminal\n"
+                "  about                 → info del navegador\n"
+                "  quit                  → cierra el navegador\n"
             )
 
-        elif command == "tormode":
-            self.enable_tor_mode()
-
-        elif command == "untor":
-            self.disable_tor_mode()
-
-        elif command == "whoami":
-            self.print_to_terminal("Consultando IP pública...")
-            def fetch_ip():
-                try:
-                    with urllib.request.urlopen("https://api.ipify.org", timeout=5) as resp:
-                        ip = resp.read().decode().strip()
-                    def show(ip=ip):
-                        self.print_to_terminal(f"Tu IP pública: {ip}")
-                        self.print_to_terminal("")
-                        self.print_prompt()
-                    GLib.idle_add(show)
-                except Exception as e:
-                    def show_err(e=e):
-                        self.print_to_terminal(f"No se pudo obtener la IP: {e}")
-                        self.print_to_terminal("")
-                        self.print_prompt()
-                    GLib.idle_add(show_err)
-            threading.Thread(target=fetch_ip, daemon=True).start()
-            return  # no imprimir prompt doble
-
-        elif command == "serverip":
-            if self.tabs[self.current_tab]["tor_active"]:
-                self.print_to_terminal("serverip no está disponible en modo Tor (por tu seguridad).")
+        elif cmd in ("open", "new"):
+            if args:
+                nav(self._resolve_input(args))
             else:
-                self.print_to_terminal("Resolviendo IPs de las 3 pestañas...")
-                def resolve_all():
-                    lines = []
-                    for i, tab in enumerate(self.tabs):
-                        uri = tab["webview"].get_uri()
-                        if not uri or uri.startswith("file://") or uri == "about:blank":
-                            lines.append(f"  Tab {i+1}: sin página cargada")
-                            continue
-                        try:
-                            parsed = urllib.parse.urlparse(uri)
-                            host = parsed.hostname
-                            ip = socket.gethostbyname(host)
-                            lines.append(f"  Tab {i+1}: {host} → {ip}")
-                        except Exception as e:
-                            lines.append(f"  Tab {i+1}: error: {e}")
-                    def show(lines=lines):
-                        self.print_to_terminal("\n".join(lines))
-                        self.print_to_terminal("")
-                        self.print_prompt()
-                    GLib.idle_add(show)
-                threading.Thread(target=resolve_all, daemon=True).start()
-                return  # no imprimir prompt doble
+                self._term_print("Uso: open <url>")
 
-        elif command == "historyten":
-            history = self.app.url_history
-            if not history:
-                self.print_to_terminal("El historial está vacío.")
-            else:
-                last10 = history[-10:]
-                lines = ["Últimas páginas visitadas:"]
-                for i, url in enumerate(reversed(last10), 1):
-                    lines.append(f"  {i:2}. {url}")
-                self.print_to_terminal("\n".join(lines))
+        elif cmd == "newtab":
+            self.open_tab(uri=self._resolve_input(args) if args else None)
 
-        elif command == "home":
-            self._wv().load_uri(self.app.home_uri)
+        elif cmd == "closetab":
+            self._on_close_tab(None, self.current_tab)
 
-        elif command == "google":
-            if args:
-                query = urllib.parse.quote(args)
-                url = f"https://www.google.com/search?q={query}"
-                self._wv().load_uri(url)
-            else:
-                self._wv().load_uri("https://www.google.com")
+        elif cmd == "tab":
+            try:
+                n = int(args) - 1
+                self._switch_tab(n)
+            except ValueError:
+                self._term_print("Uso: tab <número>")
 
-        elif command == "yt":
-            if args:
-                query = urllib.parse.quote(args)
-                url = f"https://www.youtube.com/results?search_query={query}"
-                self._wv().load_uri(url)
-            else:
-                self._wv().load_uri("https://www.youtube.com")
-
-        elif command == "wiki":
-            if args:
-                query = urllib.parse.quote(args)
-                url = f"https://es.wikipedia.org/wiki/{query}"
-                self._wv().load_uri(url)
-            else:
-                self._wv().load_uri("https://es.wikipedia.org")
-
-        elif command == "cat":
-            self._wv().load_uri("https://www.google.com/search?q=gatos+graciosos&tbm=isch")
-
-        elif command == "calc":
-            if args:
-                result = self.safe_eval(args)
-                self.print_to_terminal(f"{args} = {result}")
-
-        elif command == "time":
-            now = datetime.datetime.now().strftime("%H:%M:%S")
-            self.print_to_terminal(f"{now}")
-
-        elif command == "date":
-            today = datetime.date.today().strftime("%Y-%m-%d")
-            self.print_to_terminal(f"{today}")
-
-        elif command == "duckduckgo":
-            if args:
-                query = urllib.parse.quote(args)
-                url = f"https://duckduckgo.com/?q={query}"
-                self._wv().load_uri(url)
-            else:
-                self._wv().load_uri("https://duckduckgo.com")
-
-        elif command == "new":
-            if args:
-                if not args.startswith(('http://', 'https://', 'file://')):
-                    args = 'https://' + args
-                self._wv().load_uri(args)
-
-        elif command == "dark":
-            self.app.dark_mode = not self.app.dark_mode
-            if self.app.dark_mode:
-                self.apply_dark_css()
-
-        elif command == "say":
-            if args:
-                dialog = Gtk.AlertDialog()
-                dialog.set_message(args)
-                dialog.set_detail("Mensaje de PrekT-BR")
-                dialog.set_buttons(["OK"])
-                dialog.show(self)
-
-        elif command == "arburarbustribiet":
-            dialog = Gtk.AlertDialog()
-            dialog.set_message("Arbur Arbustribiet")
-            dialog.set_detail("")
-            dialog.set_buttons(["OK"])
-            dialog.show(self)
-            self.print_to_terminal("Arbur Arbustribiet")
-
-        elif command == "about":
-            self.print_to_terminal("PrekT-BR\nNavegador casero con WebKitGTK + terminal\nv1.0.1")
-
-        elif command in ("clear", "clean"):
-            self.clear_terminal()
-
-        elif command == "reload":
-            self._wv().reload()
-
-        elif command == "back":
+        elif cmd == "back":
             if self._wv().can_go_back():
                 self._wv().go_back()
 
-        elif command == "forward":
+        elif cmd == "forward":
             if self._wv().can_go_forward():
                 self._wv().go_forward()
 
-        elif command == "echo":
-            if args:
-                self.print_to_terminal(args)
+        elif cmd == "reload":
+            self._wv().reload()
 
-        elif command in ("quit", "exit"):
+        elif cmd == "home":
+            nav(self.app.home_uri)
+
+        # Búsqueda
+        elif cmd == "ddg":
+            q = urllib.parse.quote(args) if args else ""
+            nav(f"https://duckduckgo.com/?q={q}" if q else "https://duckduckgo.com")
+
+        elif cmd == "google":
+            q = urllib.parse.quote(args) if args else ""
+            nav(f"https://www.google.com/search?q={q}" if q else "https://www.google.com")
+
+        elif cmd == "yt":
+            q = urllib.parse.quote(args) if args else ""
+            nav(f"https://www.youtube.com/results?search_query={q}" if q else "https://www.youtube.com")
+
+        elif cmd == "wiki":
+            q = urllib.parse.quote(args) if args else ""
+            nav(f"https://es.wikipedia.org/wiki/{q}" if q else "https://es.wikipedia.org")
+
+        elif cmd == "loki":
+            if args:
+                # Quitar http/https si lo pusieron, y la extension .loki si ya la pusieron
+                addr = args.strip()
+                addr = addr.removeprefix("http://").removeprefix("https://")
+                if not addr.endswith(".loki"):
+                    addr = addr + ".loki"
+                nav(f"http://{addr}")
+            else:
+                self._term_print("Uso: loki <direccion>  (ejemplo: loki stats.i2p.rocks)")
+
+        # Red / privacidad
+        elif cmd == "tormode":
+            self._enable_network_mode("tor")
+            return
+
+        elif cmd == "i2pmode":
+            self._enable_network_mode("i2p")
+            return
+
+        elif cmd == "clearnet":
+            self._disable_network_mode()
+            return
+
+        elif cmd == "whoami":
+            self._term_print("Consultando IP pública...")
+            def fetch():
+                try:
+                    with urllib.request.urlopen("https://api.ipify.org", timeout=7) as r:
+                        ip = r.read().decode().strip()
+                    GLib.idle_add(lambda: (self._term_print(f"IP pública: {ip}"),
+                                           self._term_print(""),
+                                           self._term_prompt()) and False)
+                except Exception as e:
+                    GLib.idle_add(lambda: (self._term_print(f"Error: {e}"),
+                                           self._term_print(""),
+                                           self._term_prompt()) and False)
+            threading.Thread(target=fetch, daemon=True).start()
+            return
+
+        elif cmd == "serverip":
+            td = self._td()
+            if td.mode in ("tor", "i2p"):
+                self._term_print(f"serverip no disponible en modo {td.mode.upper()}.")
+            else:
+                uri = self._wv().get_uri()
+                if not uri or uri.startswith("file://"):
+                    self._term_print("Sin página cargada.")
+                else:
+                    host = urllib.parse.urlparse(uri).hostname
+                    def resolve():
+                        try:
+                            ip = socket.gethostbyname(host)
+                            GLib.idle_add(lambda: (self._term_print(f"{host} → {ip}"),
+                                                   self._term_print(""),
+                                                   self._term_prompt()) and False)
+                        except Exception as e:
+                            GLib.idle_add(lambda: (self._term_print(f"Error: {e}"),
+                                                   self._term_print(""),
+                                                   self._term_prompt()) and False)
+                    threading.Thread(target=resolve, daemon=True).start()
+                    return
+
+        # Marcadores e historial
+        elif cmd == "bookmark":
+            wv = self._wv()
+            uri = wv.get_uri()
+            if not uri or uri == "about:blank":
+                self._term_print("Sin página activa.")
+            else:
+                title = wv.get_title() or uri
+                if self.app.is_bookmarked(uri):
+                    self.app.remove_bookmark(uri)
+                    self._term_print(f"Marcador eliminado: {uri}")
+                    self.bookmark_star.set_label("Marcar")
+                else:
+                    self.app.add_bookmark(uri, title)
+                    self._term_print(f"Marcador guardado: {title}")
+                    self.bookmark_star.set_label("[Marcado]")
+
+        elif cmd == "bookmarks":
+            if not self.app.bookmarks:
+                self._term_print("Sin marcadores guardados.")
+            else:
+                lines = ["Marcadores guardados:"]
+                for i, b in enumerate(self.app.bookmarks, 1):
+                    lines.append(f"  {i:3}. {b['title']}\n       {b['url']}")
+                self._term_print("\n".join(lines))
+
+        elif cmd == "history":
+            try:
+                n = int(args) if args else 10
+            except ValueError:
+                n = 10
+            hist = self.app.history
+            if not hist:
+                self._term_print("El historial está vacío.")
+            else:
+                lines = [f"Últimas {n} páginas:"]
+                for i, h in enumerate(reversed(hist[-n:]), 1):
+                    ts = h.get("ts", "")[:19].replace("T", " ")
+                    lines.append(f"  {i:3}. [{ts}] {h['title']}\n       {h['url']}")
+                self._term_print("\n".join(lines))
+
+        # Utilidades
+        elif cmd == "dark":
+            self.app.dark_mode = not self.app.dark_mode
+            state = "activado" if self.app.dark_mode else "desactivado"
+            self._term_print(f"Modo oscuro {state}.")
+            if self.app.dark_mode:
+                GLib.idle_add(self._apply_dark_css)
+
+        elif cmd == "calc":
+            if args:
+                self._term_print(f"{args} = {self._safe_eval(args)}")
+            else:
+                self._term_print("Uso: calc <expresión>")
+
+        elif cmd == "time":
+            self._term_print(datetime.datetime.now().strftime("%H:%M:%S"))
+
+        elif cmd == "date":
+            self._term_print(datetime.date.today().strftime("%Y-%m-%d"))
+
+        elif cmd == "echo":
+            if args:
+                self._term_print(args)
+
+        elif cmd in ("clear", "clean"):
+            self.terminal_buf.set_text("")
+
+        elif cmd == "about":
+            self._term_print(
+                "PrekT-BR v2.0\n"
+                "WebKitGTK 6 + GTK 4 + Python\n"
+                "Redes: Tor (SOCKS5 :9050), I2P (HTTP :4444), Lokinet (SOCKS5 :1080)\n"
+                "Historial y marcadores persistentes en ~/.local/share/prektbr/"
+            )
+
+        elif cmd in ("quit", "exit"):
             self.app.quit()
+            return
+
+        elif cmd == "arburarbustribiet":
+            self._term_print("Arbur Arbustribiet!!!")
 
         else:
-            self.print_to_terminal(f"Comando desconocido: {cmd}\nPrueba 'help'")
+            self._term_print(f"Comando desconocido: '{cmd}'  —  escribe 'help'")
 
-    def on_home_clicked(self, button):
-        self._wv().load_uri(self.app.home_uri)
+        self._term_print("")
+        self._term_prompt()
 
-    def on_url_activate(self, entry):
-        url = entry.get_text().strip()
-        if not url:
-            return
-        if not url.startswith(('http://', 'https://', 'file://', 'about:')):
-            url = 'https://' + url
-        self._wv().load_uri(url)
+    def _safe_eval(self, expr):
+        allowed = {"__builtins__": {}, "math": math}
+        try:
+            return str(eval(expr, allowed, {}))
+        except Exception as e:
+            return f"Error: {e}"
 
-    def on_go_clicked(self, button):
-        self.on_url_activate(self.url_entry)
 
-    def on_uri_changed(self, webview, param):
-        # Puede dispararse durante __init__ antes de que tabs/tab_buttons estén listos
-        if not hasattr(self, 'tabs') or not self.tabs or not hasattr(self, 'url_entry'):
-            return
-        uri = webview.get_uri()
-        if uri and uri != "about:blank":
-            if webview == self._wv():
-                self.url_entry.set_text(uri)
-            if not self.app.url_history or self.app.url_history[-1] != uri:
-                self.app.url_history.append(uri)
-
-    def on_title_changed(self, webview, param):
-        if not hasattr(self, 'tabs') or not self.tabs or not hasattr(self, 'tab_buttons'):
-            return
-        title = webview.get_title()
-        for i, tab in enumerate(self.tabs):
-            if tab["webview"] == webview:
-                short = (title[:12] + "…") if title and len(title) > 12 else (title or f"Tab {i+1}")
-                self.tab_buttons[i].set_label(f" {short} ")
-                break
-        if webview == self._wv():
-            self.set_title(title if title else "PrekT-BR :3")
-
+# ─── Punto de entrada ────────────────────────────────────────────────────────
 
 def main():
     app = PrekTBR()
-    signal.signal(signal.SIGINT, sigint_handler(app))
-    app.run(sys.argv)
+    def _sigint(sig, frame):
+        app.quit()
+    signal.signal(signal.SIGINT, _sigint)
+    sys.exit(app.run(sys.argv))
 
 
 if __name__ == "__main__":
