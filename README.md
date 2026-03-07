@@ -23,6 +23,7 @@ xdg-desktop-portal-gtk
 gobject-introspection
 tor
 torsocks
+i2pd
 
 ## Funcionalidad de Tor
 
