@@ -1,6 +1,6 @@
 # PrekT-BR 
 
-Un navegador con terminal personalizada hecho con **Python/C + GTK4 + WebKitGTK 6.0**.
+Un navegador con terminal personalizada hecho con **Python + GTK4 + WebKitGTK 6.0**.
 
 Tiene barra de navegación, pestaña lateral con terminal de comandos personalizados, modo oscuro, y algunos mas
 
