@@ -25,17 +25,6 @@ tor
 torsocks
 obfs4proxy
 
-## Requisitos (Version de C)
-
-base-devel
-gtk4
-webkitgtk-6.0
-tor
-xdg-desktop-portal
-xdg-desktop-portal-gtk
-obfs4proxy
-torsocks
-
 ## Funcionalidad de Tor
 
 Este navegador tiene la funcion tormode para poder acceder a sitios onion, TEN CUIDADO, este navegador no esta hecho para reemplazar al Tor Browser.
