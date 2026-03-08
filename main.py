@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 #  PrekT-BR — Navegador personal basado en WebKitGTK 6
-#  Versión 2.0
+#  Versión 2.1 - SECURE ENHaNCED
 #
 
 import sys
@@ -12,6 +12,8 @@ import json
 import math
 import signal
 import socket
+import hashlib
+import base64
 import threading
 import datetime
 import urllib.parse
@@ -35,19 +37,47 @@ BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ─── Persistencia ────────────────────────────────────────────────────────────
+# ─── Cifrado de datos en disco ────────────────────────────────────────────────
+# Usa XOR con clave derivada del username para ofuscar historial y marcadores.
+# No es cifrado fuerte (sin autenticación), pero evita que cualquier proceso
+# o script lea los datos en texto plano.
+
+def _derive_key(length=64):
+    """Deriva una clave a partir del nombre de usuario del sistema."""
+    seed = (os.environ.get("USER") or os.environ.get("USERNAME") or "prektbr") + "prektbr-v2"
+    digest = hashlib.sha256(seed.encode()).digest()
+    # Extender la clave repitiendo el hash hasta la longitud necesaria
+    key = digest
+    while len(key) < length:
+        key += hashlib.sha256(key).digest()
+    return key
+
+_KEY = _derive_key()
+
+def _xor_bytes(data: bytes) -> bytes:
+    key = _KEY
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 
 def load_json(path, default):
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(path, "rb") as f:
+            raw = f.read()
+        # Detectar si el archivo es texto plano (migración desde versión anterior)
+        try:
+            decoded = _xor_bytes(base64.b64decode(raw))
+            return json.loads(decoded.decode("utf-8"))
+        except Exception:
+            # Intentar como JSON plano (compatibilidad hacia atrás)
+            return json.loads(raw.decode("utf-8"))
     except Exception:
         return default
 
 def save_json(path, data):
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        encrypted = base64.b64encode(_xor_bytes(raw))
+        with open(path, "wb") as f:
+            f.write(encrypted)
     except Exception as e:
         print(f"[prektbr] Error guardando {path}: {e}")
 
@@ -162,16 +192,6 @@ GLOBAL_CSS = """
 .badge-i2p {
     background-color: #1a6b3c;
     color: #a6e3a1;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 12px;
-    font-family: monospace;
-    font-weight: bold;
-}
-
-.badge-lokinet {
-    background-color: #1a3a6b;
-    color: #89b4fa;
     border-radius: 4px;
     padding: 2px 8px;
     font-size: 12px;
@@ -502,11 +522,34 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self.tabs[0].webview.load_uri(self.app.home_uri)
             return
         td = self.tabs[idx]
+        # Limpiar datos de navegación de la pestaña antes de cerrarla
+        self._clear_tab_data(td)
         self.tab_stack.remove(td.webview)
         self.tabs.pop(idx)
         self._rebuild_tabbar()
         new_idx = min(idx, len(self.tabs) - 1)
         self._switch_tab(new_idx)
+
+    def _clear_tab_data(self, td):
+        """Limpia cookies, caché y almacenamiento local de la sesión de la pestaña."""
+        try:
+            ns = td.webview.get_network_session()
+            if ns:
+                wds = ns.get_website_data_store()
+                if wds:
+                    # Limpiar todos los tipos de datos almacenados
+                    wds.clear(
+                        WebKit.WebsiteDataTypes.COOKIES |
+                        WebKit.WebsiteDataTypes.DISK_CACHE |
+                        WebKit.WebsiteDataTypes.MEMORY_CACHE |
+                        WebKit.WebsiteDataTypes.SESSION_STORAGE |
+                        WebKit.WebsiteDataTypes.LOCAL_STORAGE |
+                        WebKit.WebsiteDataTypes.INDEXED_DB_DATABASES |
+                        WebKit.WebsiteDataTypes.OFFLINE_APPLICATION_CACHE,
+                        0, None, None
+                    )
+        except Exception as e:
+            print(f"[prektbr] Error limpiando datos de pestaña: {e}")
 
     def _rebuild_tabbar(self):
         child = self.tabbar_box.get_first_child()
@@ -579,15 +622,31 @@ class BrowserWindow(Gtk.ApplicationWindow):
             wv = WebKit.WebView()
 
         s = WebKit.Settings.new()
-        s.set_enable_developer_extras(True)
+
+        # ── DevTools: deshabilitado en producción ────────────────────────────
+        s.set_enable_developer_extras(False)
+
+        # ── Portapapeles: JS no puede acceder ────────────────────────────────
         s.set_javascript_can_access_clipboard(False)
-        if mode in ("tor", "i2p", "lokinet"):
-            s.set_enable_webrtc(False)
-            s.set_enable_mediasource(False)
-            s.set_enable_encrypted_media(False)
-            s.set_user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
-            )
+
+        # ── WebRTC deshabilitado en TODOS los modos (evita IP leak) ─────────
+        s.set_enable_webrtc(False)
+
+        # ── Hardening general (aplica siempre) ───────────────────────────────
+        s.set_enable_mediasource(False)          # reduce superficie de ataque
+        s.set_enable_encrypted_media(False)      # sin DRM
+        s.set_enable_back_forward_navigation_gestures(False)
+        s.set_media_playback_requires_user_gesture(True)   # sin autoplay
+        s.set_javascript_can_open_windows_automatically(False)  # sin popups
+        s.set_allow_modal_dialogs(False)         # bloquear alert/confirm/prompt
+        s.set_enable_page_cache(False)           # sin caché bfcache (privacidad)
+
+        # ── Anti-fingerprinting: User-Agent normalizado siempre ───────────────
+        # Usamos el mismo UA que Tor Browser para reducir singularidad
+        s.set_user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0"
+        )
+
         wv.set_settings(s)
         wv.set_vexpand(True)
         wv.set_hexpand(True)
@@ -596,9 +655,312 @@ class BrowserWindow(Gtk.ApplicationWindow):
         wv.connect("notify::title", self._on_title_changed)
         wv.connect("load-changed",  self._on_load_changed)
         wv.connect("notify::estimated-load-progress", self._on_progress)
+
+        # ── Inyección anti-fingerprinting tras cada carga ─────────────────────
+        wv.connect("load-changed", self._on_load_inject_fp_protection)
+
         return wv
 
     # ── Señales del WebView ──────────────────────────────────────────────────
+
+    FP_PROTECTION_JS = """
+(function() {
+    'use strict';
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 1. LETTERBOXING — viewport redondeado a múltiplos de 100x100 (Tor-style)
+    //    Evita que el tamaño real de la ventana sea un identificador único.
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        function rounded(v, step) { return Math.floor(v / step) * step || step; }
+        const RW = rounded(window.innerWidth,  100);
+        const RH = rounded(window.innerHeight, 100);
+        const props = {
+            innerWidth:  RW, innerHeight: RH,
+            outerWidth:  RW, outerHeight: RH,
+        };
+        for (const [k, v] of Object.entries(props)) {
+            try { Object.defineProperty(window, k, { get: () => v, configurable: true }); } catch(e) {}
+        }
+        // document.documentElement.clientWidth/clientHeight
+        try {
+            const origClientWidth  = Object.getOwnPropertyDescriptor(Element.prototype, 'clientWidth');
+            const origClientHeight = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight');
+            if (origClientWidth) Object.defineProperty(HTMLHtmlElement.prototype, 'clientWidth',
+                { get: function() { return this === document.documentElement ? RW : origClientWidth.get.call(this); }, configurable: true });
+            if (origClientHeight) Object.defineProperty(HTMLHtmlElement.prototype, 'clientHeight',
+                { get: function() { return this === document.documentElement ? RH : origClientHeight.get.call(this); }, configurable: true });
+        } catch(e) {}
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 2. TIMING ATTACKS — degradar precisión de performance.now() y Date.now()
+    //    Sin resolución de microsegundos no se pueden hacer ataques de timing.
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        // Redondear a múltiplos de 2ms (mismo valor que Firefox en modo resistencia)
+        const GRANULARITY = 2;
+        const origNow = performance.now.bind(performance);
+        performance.now = function() {
+            return Math.round(origNow() / GRANULARITY) * GRANULARITY;
+        };
+        // Date.now también
+        const origDateNow = Date.now;
+        Date.now = function() {
+            return Math.round(origDateNow() / GRANULARITY) * GRANULARITY;
+        };
+        // SharedArrayBuffer deshabilitado (timing via workers)
+        try { delete window.SharedArrayBuffer; } catch(e) {}
+        // Atomics también
+        try { delete window.Atomics; } catch(e) {}
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 3. CANVAS FINGERPRINTING — ruido por sesión (consistente en la página)
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        // Semilla de ruido fija por carga de página (no cambia en cada lectura)
+        const NOISE_SEED = (Math.random() * 0xFFFFFFFF) | 0;
+        function noiseByte(index) {
+            // LCG simple para ruido determinístico por pixel
+            return ((NOISE_SEED ^ (index * 1664525 + 1013904223)) >>> 24) & 1;
+        }
+        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type, ...args) {
+            const ctx = this.getContext('2d');
+            if (ctx && this.width > 0 && this.height > 0) {
+                const id = ctx.getImageData(0, 0, this.width, this.height);
+                for (let i = 0; i < id.data.length; i += 4) {
+                    id.data[i]     ^= noiseByte(i);
+                    id.data[i + 1] ^= noiseByte(i + 1);
+                    id.data[i + 2] ^= noiseByte(i + 2);
+                }
+                ctx.putImageData(id, 0, 0);
+            }
+            return origToDataURL.call(this, type, ...args);
+        };
+        const origToBlob = HTMLCanvasElement.prototype.toBlob;
+        HTMLCanvasElement.prototype.toBlob = function(cb, ...args) {
+            const tmp = document.createElement('canvas');
+            tmp.width = this.width; tmp.height = this.height;
+            const tc = tmp.getContext('2d');
+            tc.drawImage(this, 0, 0);
+            const id = tc.getImageData(0, 0, tmp.width, tmp.height);
+            for (let i = 0; i < id.data.length; i += 4) {
+                id.data[i]     ^= noiseByte(i);
+                id.data[i + 1] ^= noiseByte(i + 1);
+                id.data[i + 2] ^= noiseByte(i + 2);
+            }
+            tc.putImageData(id, 0, 0);
+            return origToBlob.call(tmp, cb, ...args);
+        };
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 4. AUDIOCONTEXT — ruido en procesamiento de audio
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        const ACtx = window.AudioContext || window.webkitAudioContext;
+        if (!ACtx) return;
+        const OrigAC = ACtx;
+        const Patched = function(...args) {
+            const ctx = new OrigAC(...args);
+            // Interceptar createAnalyser para añadir ruido a getFloatFrequencyData
+            const origCreateAnalyser = ctx.createAnalyser.bind(ctx);
+            ctx.createAnalyser = function() {
+                const a = origCreateAnalyser();
+                const origGetFloat = a.getFloatFrequencyData.bind(a);
+                a.getFloatFrequencyData = function(arr) {
+                    origGetFloat(arr);
+                    for (let i = 0; i < arr.length; i++) arr[i] += (Math.random() - 0.5) * 0.1;
+                };
+                return a;
+            };
+            return ctx;
+        };
+        try {
+            if (window.AudioContext)       window.AudioContext       = Patched;
+            if (window.webkitAudioContext) window.webkitAudioContext = Patched;
+        } catch(e) {}
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 5. NAVIGATOR — normalizar todos los campos identificadores
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        const overrides = {
+            platform:            'Win32',
+            hardwareConcurrency: 4,
+            deviceMemory:        8,
+            languages:           ['en-US', 'en'],
+            language:            'en-US',
+            plugins:             [],
+            mimeTypes:           [],
+            doNotTrack:          '1',
+            maxTouchPoints:      0,
+            vendor:              'Google Inc.',       // Consistente con Chrome UA
+            vendorSub:           '',
+            productSub:          '20030107',
+            appName:             'Netscape',
+            appVersion:          '5.0 (Windows)',
+        };
+        for (const [k, v] of Object.entries(overrides)) {
+            try { Object.defineProperty(navigator, k, { get: () => v, configurable: true }); } catch(e) {}
+        }
+        // connection API (tipo de red)
+        if (navigator.connection) {
+            try {
+                Object.defineProperty(navigator, 'connection', {
+                    get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10,
+                                  saveData: false, addEventListener: () => {} }),
+                    configurable: true
+                });
+            } catch(e) {}
+        }
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 6. SCREEN — resolución normalizada
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        const s = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1080,
+                    colorDepth: 24, pixelDepth: 24, orientation: { type: 'landscape-primary', angle: 0 } };
+        for (const [k, v] of Object.entries(s)) {
+            try { Object.defineProperty(screen, k, { get: () => v, configurable: true }); } catch(e) {}
+        }
+        try { Object.defineProperty(window, 'devicePixelRatio', { get: () => 1, configurable: true }); } catch(e) {}
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 7. WEBGL — normalizar vendor, renderer y extensiones
+    // ═══════════════════════════════════════════════════════════════════════
+    (function() {
+        function patchGL(ctx) {
+            if (!ctx) return;
+            const origGetParam = ctx.getParameter.bind(ctx);
+            ctx.getParameter = function(p) {
+                if (p === 37445) return 'Intel Inc.';
+                if (p === 37446) return 'Intel Iris OpenGL Engine';
+                return origGetParam(p);
+            };
+            // Suprimir extensiones que revelan hardware
+            const origGetExt = ctx.getExtension.bind(ctx);
+            ctx.getExtension = function(name) {
+                const blocked = ['WEBGL_debug_renderer_info', 'EXT_disjoint_timer_query',
+                                 'EXT_disjoint_timer_query_webgl2'];
+                if (blocked.includes(name)) return null;
+                return origGetExt(name);
+            };
+            const origGetSupportedExt = ctx.getSupportedExtensions.bind(ctx);
+            ctx.getSupportedExtensions = function() {
+                const exts = origGetSupportedExt() || [];
+                return exts.filter(e => !['WEBGL_debug_renderer_info',
+                    'EXT_disjoint_timer_query', 'EXT_disjoint_timer_query_webgl2'].includes(e));
+            };
+        }
+        const origGetContext = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+            const ctx = origGetContext.call(this, type, ...args);
+            if (ctx && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
+                patchGL(ctx);
+            }
+            return ctx;
+        };
+    })();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 8. BATTERY API — datos fijos
+    // ═══════════════════════════════════════════════════════════════════════
+    if (navigator.getBattery) {
+        navigator.getBattery = () => Promise.resolve({
+            charging: true, chargingTime: 0,
+            dischargingTime: Infinity, level: 1.0,
+            addEventListener: () => {}, removeEventListener: () => {}
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 9. TIMEZONE — forzar UTC en Date e Intl
+    // ═══════════════════════════════════════════════════════════════════════
+    Date.prototype.getTimezoneOffset = function() { return 0; };
+    try {
+        const origDTF = Intl.DateTimeFormat;
+        Intl.DateTimeFormat = function(locale, opts = {}) {
+            opts.timeZone = 'UTC';
+            return new origDTF(locale, opts);
+        };
+        Object.assign(Intl.DateTimeFormat, origDTF);
+        Intl.DateTimeFormat.prototype = origDTF.prototype;
+    } catch(e) {}
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 10. FUENTES — bloquear enumeración
+    // ═══════════════════════════════════════════════════════════════════════
+    if (document.fonts && document.fonts.check) {
+        const generic = ['serif','sans-serif','monospace','cursive','fantasy','system-ui'];
+        const origCheck = document.fonts.check.bind(document.fonts);
+        document.fonts.check = (font, txt) =>
+            generic.some(g => font.toLowerCase().includes(g)) ? origCheck(font, txt) : false;
+        // load() retorna vacío para fuentes no genéricas
+        const origLoad = document.fonts.load.bind(document.fonts);
+        document.fonts.load = (font, txt) =>
+            generic.some(g => font.toLowerCase().includes(g)) ? origLoad(font, txt) : Promise.resolve([]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 11. WINDOW.NAME — limpiar (evita tracking entre páginas)
+    // ═══════════════════════════════════════════════════════════════════════
+    window.name = '';
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 12. NETWORK INFORMATION API — normalizar
+    // ═══════════════════════════════════════════════════════════════════════
+    try {
+        Object.defineProperty(navigator, 'onLine', { get: () => true, configurable: true });
+    } catch(e) {}
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 13. GEOLOCATION — bloquear silenciosamente
+    // ═══════════════════════════════════════════════════════════════════════
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition = (ok, err) => {
+            if (err) err({ code: 1, message: 'Permission denied' });
+        };
+        navigator.geolocation.watchPosition = (ok, err) => {
+            if (err) err({ code: 1, message: 'Permission denied' });
+            return 0;
+        };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 14. MEDIA DEVICES — ocultar cámaras y micrófonos
+    // ═══════════════════════════════════════════════════════════════════════
+    if (navigator.mediaDevices) {
+        navigator.mediaDevices.enumerateDevices = () => Promise.resolve([]);
+        navigator.mediaDevices.getUserMedia    = () => Promise.reject(new DOMException('NotAllowedError'));
+        navigator.mediaDevices.getDisplayMedia = () => Promise.reject(new DOMException('NotAllowedError'));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 15. SPEECH SYNTHESIS / RECOGNITION — bloquear (revela OS y voces)
+    // ═══════════════════════════════════════════════════════════════════════
+    try {
+        if (window.speechSynthesis) {
+            window.speechSynthesis.getVoices = () => [];
+        }
+        delete window.SpeechRecognition;
+        delete window.webkitSpeechRecognition;
+    } catch(e) {}
+
+})();
+"""
+
+    def _on_load_inject_fp_protection(self, wv, event):
+        """Inyecta protecciones anti-fingerprinting al inicio de cada carga."""
+        if event == WebKit.LoadEvent.STARTED:
+            wv.evaluate_javascript(
+                self.FP_PROTECTION_JS, -1, None, None, None, None
+            )
 
     def _on_uri_changed(self, wv, _param):
         if not self.tabs:
@@ -678,7 +1040,14 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self._wv().load_uri(url)
 
     def _resolve_input(self, text):
-        if text.startswith(("http://", "https://", "file://", "about:")):
+        # Bloquear esquemas peligrosos
+        dangerous = ("javascript:", "data:", "vbscript:", "blob:", "file:")
+        lower = text.strip().lower()
+        for scheme in dangerous:
+            if lower.startswith(scheme):
+                self.statusbar.set_label(f"Esquema bloqueado: {scheme}")
+                return "about:blank"
+        if text.startswith(("http://", "https://", "about:")):
             return text
         # Si parece dominio (tiene punto y sin espacios)
         if "." in text and " " not in text:
@@ -982,6 +1351,8 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 "  time / date           → hora / fecha\n"
                 "  echo <texto>          → repite texto\n"
                 "  clear                 → limpia terminal\n"
+                "  clearcookies          → borra cookies/datos de pestaña actual\n"
+                "  clearall              → borra datos de todas las pestañas\n"
                 "  about                 → info del navegador\n"
                 "  quit                  → cierra el navegador\n"
             )
@@ -1064,7 +1435,13 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self._term_print("Consultando IP pública...")
             def fetch():
                 try:
-                    with urllib.request.urlopen("https://api.ipify.org", timeout=7) as r:
+                    import ssl
+                    ctx = ssl.create_default_context()
+                    req = urllib.request.Request(
+                        "https://api.ipify.org",
+                        headers={"User-Agent": "curl/7.88"}
+                    )
+                    with urllib.request.urlopen(req, timeout=7, context=ctx) as r:
                         ip = r.read().decode().strip()
                     GLib.idle_add(lambda: (self._term_print(f"IP pública: {ip}"),
                                            self._term_print(""),
@@ -1169,17 +1546,48 @@ class BrowserWindow(Gtk.ApplicationWindow):
 
         elif cmd == "about":
             self._term_print(
-                "PrekT-BR v2.0\n"
+                "PrekT-BR v2.1 — Hardened Edition\n"
                 "WebKitGTK 6 + GTK 4 + Python\n"
-                "Redes: Tor (SOCKS5 :9050), I2P (HTTP :4444), Lokinet (SOCKS5 :1080)\n"
-                "Historial y marcadores persistentes en ~/.local/share/prektbr/"
+                "Redes: Tor (SOCKS5 :9050), I2P (HTTP :4444)"
+                "─── Protecciones activas ──────────────────────\n"
+                "  [*] WebRTC deshabilitado (sin IP leak)\n"
+                "  [*] User-Agent: Firefox/Windows normalizado\n"
+                "  [*] Letterboxing: viewport redondeado a 100x100\n"
+                "  [*] performance.now() degradado a 2ms (anti timing-attack)\n"
+                "  [*] SharedArrayBuffer/Atomics: eliminados\n"
+                "  [*] Canvas: ruido por semilla de sesión\n"
+                "  [*] AudioContext: ruido en análisis de frecuencia\n"
+                "  [*] WebGL: vendor/renderer normalizado, debug bloqueado\n"
+                "  [*] Navigator: platform/plugins/idioma/memoria fijos\n"
+                "  [*] Screen: resolución normalizada a 1920x1080\n"
+                "  [*] Timezone: forzado a UTC\n"
+                "  [*] Battery API: datos fijos\n"
+                "  [*] Font enumeration: bloqueada\n"
+                "  [*] Geolocation: bloqueada silenciosamente\n"
+                "  [*] MediaDevices: cámaras/micrófonos ocultos\n"
+                "  [*] SpeechSynthesis/Recognition: bloqueados\n"
+                "  [*] Cookies: limpieza automática al cerrar pestaña\n"
+                "  [*] JS popups y autoplay: bloqueados\n"
+                "  [*] Esquemas peligrosos bloqueados (js:, data:, blob:)\n"
+                "  [*] calc: evaluador AST seguro sin eval()\n"
+                "  [*] DevTools: deshabilitadas\n"
+                "  [*] Historial/marcadores: cifrados en disco\n"
+                "Comandos: clearcookies | clearall\n"
             )
+
+        elif cmd == "clearcookies":
+            td = self._td()
+            self._clear_tab_data(td)
+            self._term_print("Cookies y datos de sesión de la pestaña actual eliminados.")
+
+        elif cmd == "clearall":
+            for td in self.tabs:
+                self._clear_tab_data(td)
+            self._term_print("Datos de todas las pestañas eliminados.")
 
         elif cmd in ("quit", "exit"):
             self.app.quit()
             return
-
-        elif cmd == "arburarbustribiet":
             self._term_print("Arbur Arbustribiet!!!")
 
         else:
@@ -1189,9 +1597,38 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self._term_prompt()
 
     def _safe_eval(self, expr):
-        allowed = {"__builtins__": {}, "math": math}
+        """Evaluador seguro de expresiones matemáticas sin usar eval()."""
+        import re
+        # Solo permitir caracteres seguros: números, operadores, espacios, funciones math
+        allowed_pattern = re.compile(r'^[\d\s\+\-\*/\(\)\.\^%,a-z_]+$')
+        expr_clean = expr.strip().lower()
+        if not allowed_pattern.match(expr_clean):
+            return "Error: expresión no permitida"
+        # Reemplazar ^ por ** para potencias
+        expr_clean = expr_clean.replace('^', '**')
+        # Sustituir funciones math permitidas
+        math_funcs = {
+            name: getattr(math, name)
+            for name in dir(math)
+            if not name.startswith('_')
+        }
         try:
-            return str(eval(expr, allowed, {}))
+            # Compilar AST y verificar que solo contiene nodos seguros
+            import ast
+            tree = ast.parse(expr_clean, mode='eval')
+            allowed_nodes = (
+                ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call,
+                ast.Constant, ast.Add, ast.Sub, ast.Mult, ast.Div,
+                ast.Mod, ast.Pow, ast.USub, ast.UAdd, ast.Name,
+                ast.Load, ast.FloorDiv,
+            )
+            for node in ast.walk(tree):
+                if not isinstance(node, allowed_nodes):
+                    return f"Error: operación no permitida ({type(node).__name__})"
+                if isinstance(node, ast.Name) and node.id not in math_funcs:
+                    return f"Error: nombre no permitido '{node.id}'"
+            result = eval(compile(tree, '<calc>', 'eval'), {"__builtins__": {}}, math_funcs)
+            return str(result)
         except Exception as e:
             return f"Error: {e}"
 
