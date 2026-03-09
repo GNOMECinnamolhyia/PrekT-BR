@@ -14,6 +14,7 @@ import signal
 import socket
 import hashlib
 import base64
+import secrets
 import threading
 import datetime
 import urllib.parse
@@ -42,15 +43,34 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # No es cifrado fuerte (sin autenticación), pero evita que cualquier proceso
 # o script lea los datos en texto plano.
 
-def _derive_key(length=64):
-    """Deriva una clave a partir del nombre de usuario del sistema."""
-    seed = (os.environ.get("USER") or os.environ.get("USERNAME") or "prektbr") + "prektbr-v2"
-    digest = hashlib.sha256(seed.encode()).digest()
-    # Extender la clave repitiendo el hash hasta la longitud necesaria
-    key = digest
-    while len(key) < length:
-        key += hashlib.sha256(key).digest()
-    return key
+_SALT_FILE = os.path.join(DATA_DIR, ".salt")
+
+def _get_or_create_salt() -> bytes:
+    """Obtiene o crea una sal aleatoria persistente por instalación."""
+    try:
+        if os.path.exists(_SALT_FILE):
+            with open(_SALT_FILE, "rb") as f:
+                salt = f.read()
+            if len(salt) == 32:
+                return salt
+    except Exception:
+        pass
+    salt = secrets.token_bytes(32)
+    try:
+        with open(_SALT_FILE, "wb") as f:
+            f.write(salt)
+        os.chmod(_SALT_FILE, 0o600)
+    except Exception:
+        pass
+    return salt
+
+def _derive_key(length=64) -> bytes:
+    """Deriva una clave usando PBKDF2-HMAC-SHA256 con sal aleatoria persistente."""
+    user = (os.environ.get("USER") or os.environ.get("USERNAME") or "prektbr").encode()
+    salt = _get_or_create_salt()
+    # PBKDF2 con 200 000 iteraciones — mucho más costoso de bruteforcear
+    dk = hashlib.pbkdf2_hmac("sha256", user + b"prektbr-v3", salt, 200_000, dklen=length)
+    return dk
 
 _KEY = _derive_key()
 
@@ -198,6 +218,97 @@ GLOBAL_CSS = """
     font-family: monospace;
     font-weight: bold;
 }
+.badge-clear {
+    background-color: #313244;
+    color: #a6e3a1;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+.badge-file {
+    background-color: #2a3550;
+    color: #89b4fa;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+
+/* Badge de seguridad HTTPS */
+.badge-secure {
+    background-color: #1a4731;
+    color: #a6e3a1;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+.badge-insecure {
+    background-color: #4a1a1a;
+    color: #f38ba8;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+.badge-onion {
+    background-color: #7f49a0;
+    color: #f5c2e7;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+.badge-eepsite {
+    background-color: #1a6b3c;
+    color: #a6e3a1;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: bold;
+}
+
+/* Barra de búsqueda en página */
+.findbar {
+    background-color: #1e1e2e;
+    border-top: 1px solid #313244;
+    padding: 4px 8px;
+}
+.findbar-entry {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 13px;
+    min-height: 28px;
+    min-width: 200px;
+}
+.findbar-entry:focus {
+    border-color: #89b4fa;
+}
+.findbar-label {
+    color: #6c7086;
+    font-size: 12px;
+    padding: 0 8px;
+}
+
+/* Inspector de HTML */
+.inspector-tv {
+    background-color: #0a0a1a;
+    color: #89b4fa;
+    font-family: monospace;
+    font-size: 13px;
+    padding: 10px;
+    caret-color: #89b4fa;
+}
 
 /* Terminal */
 .terminal {
@@ -216,6 +327,18 @@ GLOBAL_CSS = """
     color: #6c7086;
     font-size: 11px;
     padding: 2px 10px;
+}
+
+/* Barra de progreso de descarga */
+.dl-progress trough {
+    background-color: #313244;
+    border-radius: 4px;
+    min-height: 8px;
+}
+.dl-progress progress {
+    background-color: #89b4fa;
+    border-radius: 4px;
+    min-height: 8px;
 }
 
 /* Botón añadir pestaña */
@@ -363,6 +486,8 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self.tabs: list[TabData] = []
         self.current_tab = -1
         self._sidebar_mode = None   # None | "bookmarks" | "history"
+        self._inspector_mode = False
+        self._findbar_visible = False
 
         self._build_ui()
         self.open_tab(uri=self.app.initial_url)
@@ -393,11 +518,11 @@ class BrowserWindow(Gtk.ApplicationWindow):
         tabbar_row.append(new_tab_btn)
 
         # Barra de navegación
-        self.back_btn    = self._nav_btn("Atras",    "Atras",            self._on_back)
-        self.forward_btn = self._nav_btn("Adelante", "Adelante",         self._on_forward)
-        self.reload_btn  = self._nav_btn("Recargar", "Recargar",         self._on_reload)
-        self.home_btn    = self._nav_btn("Inicio",   "Ir al inicio",     self._on_home)
-        self.bookmark_star = self._nav_btn("Marcar", "Guardar marcador", self._on_toggle_bookmark)
+        self.back_btn    = self._nav_btn("←",  "Atrás (Alt+Izq)",                  self._on_back)
+        self.forward_btn = self._nav_btn("→",  "Adelante (Alt+Der)",               self._on_forward)
+        self.reload_btn  = self._nav_btn("↻",  "Recargar (Ctrl+R) / Shift: sin caché", self._on_reload)
+        self.home_btn    = self._nav_btn("⌂",  "Ir al inicio",     self._on_home)
+        self.bookmark_star = self._nav_btn("★", "Guardar marcador", self._on_toggle_bookmark)
 
         self.url_entry = Gtk.Entry()
         self.url_entry.set_hexpand(True)
@@ -405,20 +530,28 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self.url_entry.set_placeholder_text("Ingresa una URL o busca en DuckDuckGo...")
         self.url_entry.connect("activate", self._on_url_activate)
 
+        # Badge de red (TOR / I2P)
         self.badge = Gtk.Label(label="")
         self.badge.add_css_class("badge-normal")
         self.badge.set_tooltip_text("Modo de red actual")
         self.badge.set_visible(False)
 
-        bmarks_btn = self._nav_btn("Marcadores", "Marcadores", lambda _: self._toggle_sidebar("bookmarks"))
-        history_btn = self._nav_btn("Historial", "Historial", lambda _: self._toggle_sidebar("history"))
-        terminal_btn = self._nav_btn("Terminal", "Terminal", self._on_toggle_terminal)
+        # Badge de seguridad (S / I / O / E)
+        self.sec_badge = Gtk.Label(label="")
+        self.sec_badge.set_tooltip_text("Estado de seguridad de la página")
+        self.sec_badge.set_visible(False)
+
+        bmarks_btn   = self._nav_btn("\u2318",       "Marcadores",                    lambda _: self._toggle_sidebar("bookmarks"))
+        history_btn  = self._nav_btn("\U0001F552\uFE0E", "Historial",            lambda _: self._toggle_sidebar("history"))
+        terminal_btn = self._nav_btn(">_",       "Terminal (Ctrl+Alt+T)",         self._on_toggle_terminal)
+        find_btn     = self._nav_btn("⌕",        "Buscar en página (Ctrl+F)",     lambda _: self._toggle_findbar())
+        inspector_btn= self._nav_btn("</>",      "Inspector HTML (Ctrl+AltGr+D)", lambda _: self._toggle_inspector())
 
         nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         nav_box.add_css_class("toolbar")
         for w in [self.back_btn, self.forward_btn, self.reload_btn, self.home_btn,
-                  self.url_entry, self.bookmark_star, self.badge,
-                  bmarks_btn, history_btn, terminal_btn]:
+                  self.sec_badge, self.url_entry, self.bookmark_star, self.badge,
+                  bmarks_btn, history_btn, find_btn, inspector_btn, terminal_btn]:
             nav_box.append(w)
 
         # Área de contenido (sidebar + webview stack + terminal)
@@ -434,7 +567,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self.tab_stack.set_hexpand(True)
         self.content_area.append(self.tab_stack)
 
-        # Terminal
+        # Terminal (modo normal — texto verde)
         self.terminal_visible = False
         self.terminal_buf = Gtk.TextBuffer()
         self.terminal_tv  = Gtk.TextView(buffer=self.terminal_buf)
@@ -457,17 +590,87 @@ class BrowserWindow(Gtk.ApplicationWindow):
         key_ctrl.connect("key-pressed", self._on_terminal_key)
         self.terminal_tv.add_controller(key_ctrl)
 
-        # Barra de estado
+        # Inspector de HTML (texto azul, reutiliza el mismo panel lateral)
+        self.inspector_buf = Gtk.TextBuffer()
+        self.inspector_tv  = Gtk.TextView(buffer=self.inspector_buf)
+        self.inspector_tv.set_editable(True)
+        self.inspector_tv.set_cursor_visible(True)
+        self.inspector_tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.inspector_tv.set_monospace(True)
+        self.inspector_tv.add_css_class("inspector-tv")
+        self.inspector_tv.set_size_request(400, 200)
+
+        insp_scroll = Gtk.ScrolledWindow()
+        insp_scroll.set_vexpand(True)
+        insp_scroll.set_hexpand(False)
+        insp_scroll.set_min_content_width(400)
+        insp_scroll.set_min_content_height(200)
+        insp_scroll.set_child(self.inspector_tv)
+        self._insp_scroll = insp_scroll
+
+        # Botones del inspector
+        insp_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        insp_btn_box.add_css_class("toolbar")
+        insp_reload_btn = self._nav_btn("Cargar HTML", "Obtener HTML actual de la página", lambda _: self._inspector_load())
+        insp_apply_btn  = self._nav_btn("Aplicar",     "Aplicar HTML editado a la página",  lambda _: self._inspector_apply())
+        insp_close_btn  = self._nav_btn("Cerrar",      "Cerrar inspector",                  lambda _: self._close_inspector())
+        for b in [insp_reload_btn, insp_apply_btn, insp_close_btn]:
+            insp_btn_box.append(b)
+
+        self._insp_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._insp_panel.append(insp_btn_box)
+        self._insp_panel.append(insp_scroll)
+
+        insp_key_ctrl = Gtk.EventControllerKey()
+        insp_key_ctrl.connect("key-pressed", self._on_inspector_key)
+        self.inspector_tv.add_controller(insp_key_ctrl)
+
+        # Barra de búsqueda en página
+        self._findbar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._findbar_box.add_css_class("findbar")
+        self._find_entry = Gtk.Entry()
+        self._find_entry.add_css_class("findbar-entry")
+        self._find_entry.set_placeholder_text("Buscar en página…")
+        self._find_entry.connect("activate", lambda _: self._find_next())
+        self._find_entry.connect("changed",  lambda _: self._find_changed())
+        find_prev_btn = self._nav_btn("↑", "Anterior (Shift+Enter)", lambda _: self._find_prev())
+        find_next_btn = self._nav_btn("↓", "Siguiente (Enter)",      lambda _: self._find_next())
+        find_close_btn= self._nav_btn("✕", "Cerrar (Esc)",           lambda _: self._close_findbar())
+        self._find_label = Gtk.Label(label="")
+        self._find_label.add_css_class("findbar-label")
+        for w in [self._find_entry, find_prev_btn, find_next_btn, self._find_label, find_close_btn]:
+            self._findbar_box.append(w)
+
+        # Barra de estado + progreso de descarga
         self.statusbar = Gtk.Label(label="")
         self.statusbar.add_css_class("statusbar")
         self.statusbar.set_halign(Gtk.Align.START)
+        self.statusbar.set_hexpand(True)
         self.statusbar.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
+
+        self._dl_progress = Gtk.ProgressBar()
+        self._dl_progress.add_css_class("dl-progress")
+        self._dl_progress.set_visible(False)
+        self._dl_progress.set_valign(Gtk.Align.CENTER)
+        self._dl_progress.set_size_request(150, -1)
+
+        statusbar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        statusbar_box.add_css_class("statusbar")
+        statusbar_box.append(self.statusbar)
+        statusbar_box.append(self._dl_progress)
 
         root.append(tabbar_row)
         root.append(nav_box)
         root.append(self.content_area)
-        root.append(self.statusbar)
+        root.append(self._findbar_box)
+        root.append(statusbar_box)
         self.set_child(root)
+        self._findbar_box.set_visible(False)
+
+        # Atajos de teclado globales
+        key_global = Gtk.EventControllerKey()
+        key_global.connect("key-pressed", self._on_global_key)
+        self.add_controller(key_global)
 
         self._term_print("PrekT-BR v2.1  —  escribe 'help' para ver los comandos")
         self._term_prompt()
@@ -514,6 +717,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
         tab_widget = self._make_tab_widget(idx)
         self.tabbar_box.append(tab_widget)
 
+        self._setup_download_handler(wv)
         self._switch_tab(idx)
         wv.load_uri(uri or self.app.home_uri)
 
@@ -595,6 +799,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self._update_badge(td.mode)
         self._update_nav_buttons()
         self._update_bookmark_star()
+        self._update_security_badge(td.webview.get_uri() or "")
 
     def _wv(self) -> WebKit.WebView:
         return self.tabs[self.current_tab].webview
@@ -654,8 +859,30 @@ class BrowserWindow(Gtk.ApplicationWindow):
         wv.connect("load-changed",  self._on_load_changed)
         wv.connect("notify::estimated-load-progress", self._on_progress)
 
-        # ── Inyección anti-fingerprinting tras cada carga ─────────────────────
-        wv.connect("load-changed", self._on_load_inject_fp_protection)
+        # ── Inyección anti-fingerprinting via UserContentManager ─────────────
+        ucm = wv.get_user_content_manager()
+        try:
+            inj_frames = WebKit.UserContentInjectedFrames.TOP_FRAME
+        except AttributeError:
+            inj_frames = WebKit.UserContentInjectedFrames.ALL_FRAMES
+        try:
+            inj_time = WebKit.UserScriptInjectionTime.START
+        except AttributeError:
+            try:
+                inj_time = WebKit.UserScriptInjectionTime.DOCUMENT_START
+            except AttributeError:
+                inj_time = 0
+        try:
+            fp_script = WebKit.UserScript(
+                self.FP_PROTECTION_JS,
+                inj_frames,
+                inj_time,
+                None, None
+            )
+            ucm.add_script(fp_script)
+        except Exception as e:
+            print(f"[prektbr] UserContentManager fallback: {e}")
+            wv.connect("load-changed", self._on_load_inject_fp_fallback)
 
         return wv
 
@@ -953,12 +1180,9 @@ class BrowserWindow(Gtk.ApplicationWindow):
 })();
 """
 
-    def _on_load_inject_fp_protection(self, wv, event):
-        """Inyecta protecciones anti-fingerprinting al inicio de cada carga."""
+    def _on_load_inject_fp_fallback(self, wv, event):
         if event == WebKit.LoadEvent.STARTED:
-            wv.evaluate_javascript(
-                self.FP_PROTECTION_JS, -1, None, None, None, None
-            )
+            wv.evaluate_javascript(self.FP_PROTECTION_JS, -1, None, None, None, None)
 
     def _on_uri_changed(self, wv, _param):
         if not self.tabs:
@@ -970,6 +1194,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self.url_entry.set_text(uri)
             self._update_bookmark_star()
             self._update_nav_buttons()
+            self._update_security_badge(uri)
         title = wv.get_title() or uri
         self.app.add_history(uri, title)
 
@@ -992,11 +1217,11 @@ class BrowserWindow(Gtk.ApplicationWindow):
 
     def _on_load_changed(self, wv, event):
         if event == WebKit.LoadEvent.STARTED:
-            self.reload_btn.set_label("Detener")
+            self.reload_btn.set_label("✕")
             self.reload_btn.set_tooltip_text("Detener carga")
         elif event == WebKit.LoadEvent.FINISHED:
-            self.reload_btn.set_label("Recargar")
-            self.reload_btn.set_tooltip_text("Recargar")
+            self.reload_btn.set_label("↻")
+            self.reload_btn.set_tooltip_text("Recargar (Ctrl+R)")
             self.statusbar.set_label("")
             if self.app.dark_mode and wv is self._wv():
                 GLib.timeout_add(400, self._apply_dark_css)
@@ -1020,13 +1245,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
         if self._wv().can_go_forward():
             self._wv().go_forward()
 
-    def _on_reload(self, _):
-        wv = self._wv()
-        if wv.is_loading():
-            wv.stop_loading()
-        else:
-            wv.reload()
-
     def _on_home(self, _):
         self._wv().load_uri(self.app.home_uri)
 
@@ -1038,14 +1256,14 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self._wv().load_uri(url)
 
     def _resolve_input(self, text):
-        # Bloquear esquemas peligrosos
-        dangerous = ("javascript:", "data:", "vbscript:", "blob:", "file:")
+        # Bloquear esquemas peligrosos (file:// permitido)
+        dangerous = ("javascript:", "data:", "vbscript:", "blob:")
         lower = text.strip().lower()
         for scheme in dangerous:
             if lower.startswith(scheme):
                 self.statusbar.set_label(f"Esquema bloqueado: {scheme}")
                 return "about:blank"
-        if text.startswith(("http://", "https://", "about:")):
+        if text.startswith(("http://", "https://", "about:", "file://")):
             return text
         # Si parece dominio (tiene punto y sin espacios)
         if "." in text and " " not in text:
@@ -1069,12 +1287,12 @@ class BrowserWindow(Gtk.ApplicationWindow):
             return
         if self.app.is_bookmarked(uri):
             self.app.remove_bookmark(uri)
-            self.bookmark_star.set_label("Marcar")
+            self.bookmark_star.set_label("★")
             self.statusbar.set_label("Marcador eliminado")
         else:
             title = wv.get_title() or uri
             self.app.add_bookmark(uri, title)
-            self.bookmark_star.set_label("[Marcado]")
+            self.bookmark_star.set_label("★")
             self.statusbar.set_label("Marcador guardado")
         GLib.timeout_add(2000, lambda: self.statusbar.set_label("") or False)
         # Refrescar sidebar si está abierto
@@ -1085,7 +1303,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
         if not self.tabs:
             return
         uri = self._wv().get_uri()
-        self.bookmark_star.set_label("[Marcado]" if self.app.is_bookmarked(uri or "") else "Marcar")
+        self.bookmark_star.set_label("★")
 
     # ── Sidebar (marcadores / historial) ─────────────────────────────────────
 
@@ -1183,6 +1401,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self.badge.remove_css_class("badge-normal")
         self.badge.remove_css_class("badge-tor")
         self.badge.remove_css_class("badge-i2p")
+        self.badge.remove_css_class("badge-clear")
         if mode == "tor":
             self.badge.set_label("TOR")
             self.badge.add_css_class("badge-tor")
@@ -1192,8 +1411,9 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self.badge.add_css_class("badge-i2p")
             self.badge.set_visible(True)
         else:
-            self.badge.set_label("")
-            self.badge.set_visible(False)
+            self.badge.set_label("Clear")
+            self.badge.add_css_class("badge-clear")
+            self.badge.set_visible(True)
 
     # ── Modo oscuro ──────────────────────────────────────────────────────────
 
@@ -1213,7 +1433,452 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self._wv().evaluate_javascript(js, -1, None, None, None, None)
         return False
 
-    # ── Tor / I2P ────────────────────────────────────────────────────────────
+    # ── Atajos de teclado globales ───────────────────────────────────────────
+
+    def _on_global_key(self, ctrl, keyval, keycode, state):
+        ctrl_held  = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        alt_held   = bool(state & Gdk.ModifierType.ALT_MASK)
+        shift_held = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        # Mod5 es AltGr en la mayoría de teclados Linux
+        altgr_held = bool(state & Gdk.ModifierType.MOD5_MASK)
+
+        if ctrl_held and not alt_held and not altgr_held:
+            if keyval == Gdk.KEY_t:                  # Ctrl+T — nueva pestaña
+                self.open_tab()
+                return True
+            if keyval == Gdk.KEY_w:                  # Ctrl+W — cerrar pestaña
+                self._on_close_tab(self.current_tab)
+                return True
+            if keyval == Gdk.KEY_l:                  # Ctrl+L — foco en URL
+                self.url_entry.grab_focus()
+                self.url_entry.select_region(0, -1)
+                return True
+            if keyval == Gdk.KEY_r and not shift_held:  # Ctrl+R — recargar
+                self._wv().reload()
+                return True
+            if keyval == Gdk.KEY_r and shift_held:      # Ctrl+Shift+R — sin caché
+                self._wv().reload_bypass_cache()
+                return True
+            if keyval == Gdk.KEY_f:                  # Ctrl+F — buscar en página
+                self._toggle_findbar()
+                return True
+            if keyval == Gdk.KEY_plus or keyval == Gdk.KEY_equal:  # Ctrl++ zoom in
+                wv = self._wv()
+                wv.set_zoom_level(min(wv.get_zoom_level() + 0.1, 5.0))
+                return True
+            if keyval == Gdk.KEY_minus:              # Ctrl+- — zoom out
+                wv = self._wv()
+                wv.set_zoom_level(max(wv.get_zoom_level() - 0.1, 0.1))
+                return True
+            if keyval == Gdk.KEY_0:                  # Ctrl+0 — zoom reset
+                self._wv().set_zoom_level(1.0)
+                return True
+
+        if ctrl_held and alt_held and not altgr_held:
+            if keyval in (Gdk.KEY_t, Gdk.KEY_Return):  # Ctrl+Alt+T — terminal
+                self._on_toggle_terminal(None)
+                return True
+
+        if ctrl_held and altgr_held:
+            if keyval == Gdk.KEY_d:                  # Ctrl+AltGr+D — inspector
+                self._toggle_inspector()
+                return True
+
+        if not ctrl_held and not alt_held:
+            if keyval == Gdk.KEY_Escape:
+                if self._findbar_visible:
+                    self._close_findbar()
+                    return True
+                if self._inspector_mode:
+                    self._close_inspector()
+                    return True
+
+        if alt_held and not ctrl_held:
+            if keyval == Gdk.KEY_Left:               # Alt+Izq — atrás
+                if self._wv().can_go_back():
+                    self._wv().go_back()
+                return True
+            if keyval == Gdk.KEY_Right:              # Alt+Der — adelante
+                if self._wv().can_go_forward():
+                    self._wv().go_forward()
+                return True
+
+        return False
+
+    # ── Seguridad: badge S / I / O / E ───────────────────────────────────────
+
+    def _update_security_badge(self, uri):
+        if not uri or uri.startswith("about:"):
+            self.sec_badge.set_visible(False)
+            return
+        parsed = urllib.parse.urlparse(uri)
+        host = parsed.hostname or ""
+        scheme = parsed.scheme
+
+        self.sec_badge.remove_css_class("badge-secure")
+        self.sec_badge.remove_css_class("badge-insecure")
+        self.sec_badge.remove_css_class("badge-onion")
+        self.sec_badge.remove_css_class("badge-eepsite")
+        self.sec_badge.remove_css_class("badge-file")
+
+        if scheme == "file":
+            self.sec_badge.set_label("F")
+            self.sec_badge.add_css_class("badge-file")
+            self.sec_badge.set_tooltip_text("Archivo local")
+        elif host.endswith(".onion"):
+            self.sec_badge.set_label("O")
+            self.sec_badge.add_css_class("badge-onion")
+            self.sec_badge.set_tooltip_text("Onion — servicio oculto Tor")
+        elif host.endswith(".i2p") or host.endswith(".loki"):
+            self.sec_badge.set_label("E")
+            self.sec_badge.add_css_class("badge-eepsite")
+            self.sec_badge.set_tooltip_text("Eepsite — servicio I2P/Lokinet")
+        elif scheme == "https":
+            self.sec_badge.set_label("S")
+            self.sec_badge.add_css_class("badge-secure")
+            self.sec_badge.set_tooltip_text("Seguro — conexión HTTPS")
+        else:
+            self.sec_badge.set_label("I")
+            self.sec_badge.add_css_class("badge-insecure")
+            self.sec_badge.set_tooltip_text("Inseguro — conexión HTTP sin cifrar")
+        self.sec_badge.set_visible(True)
+
+    # ── Buscar en página ──────────────────────────────────────────────────────
+
+    def _toggle_findbar(self):
+        if self._findbar_visible:
+            self._close_findbar()
+        else:
+            self._findbar_box.set_visible(True)
+            self._findbar_visible = True
+            self._find_entry.grab_focus()
+
+    def _close_findbar(self):
+        self._findbar_box.set_visible(False)
+        self._findbar_visible = False
+        self._wv().get_find_controller().search_finish()
+        self._find_label.set_label("")
+
+    def _find_changed(self):
+        text = self._find_entry.get_text()
+        fc = self._wv().get_find_controller()
+        if text:
+            fc.search(text, WebKit.FindOptions.CASE_INSENSITIVE |
+                      WebKit.FindOptions.WRAP_AROUND, 1000)
+        else:
+            fc.search_finish()
+            self._find_label.set_label("")
+
+    def _find_next(self):
+        fc = self._wv().get_find_controller()
+        text = self._find_entry.get_text()
+        if text:
+            fc.search_next()
+
+    def _find_prev(self):
+        fc = self._wv().get_find_controller()
+        text = self._find_entry.get_text()
+        if text:
+            fc.search_previous()
+
+    # ── Inspector de HTML ─────────────────────────────────────────────────────
+
+    def _toggle_inspector(self):
+        if self._inspector_mode:
+            self._close_inspector()
+        else:
+            self._open_inspector()
+
+    def _open_inspector(self):
+        if self._inspector_mode:
+            return
+        if self.terminal_visible:
+            self.statusbar.set_label("Cierra la terminal primero (Ctrl+Alt+T)")
+            GLib.timeout_add(2000, lambda: self.statusbar.set_label("") or False)
+            return
+        self._inspector_mode = True
+        self.content_area.append(self._insp_panel)
+        self._inspector_load()
+
+    def _close_inspector(self):
+        if not self._inspector_mode:
+            return
+        self.content_area.remove(self._insp_panel)
+        self._inspector_mode = False
+
+    def _format_html(self, html):
+        """Formatea HTML con indentación legible usando html.parser."""
+        import html as html_mod
+        from html.parser import HTMLParser
+
+        INLINE_TAGS = {
+            "a", "abbr", "acronym", "b", "bdo", "big", "br", "button", "cite",
+            "code", "dfn", "em", "i", "img", "input", "kbd", "label", "map",
+            "object", "output", "q", "samp", "select", "small", "span", "strong",
+            "sub", "sup", "textarea", "time", "tt", "u", "var",
+        }
+        VOID_TAGS = {
+            "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+            "meta", "param", "source", "track", "wbr",
+        }
+        RAW_TAGS = {"script", "style"}
+
+        class Formatter(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=False)
+                self.out = []
+                self.indent = 0
+                self.in_raw = False
+                self.raw_tag = ""
+
+            def _pad(self):
+                return "  " * self.indent
+
+            def handle_starttag(self, tag, attrs):
+                if self.in_raw:
+                    self.out.append(self.get_starttag_text() or "")
+                    return
+                attr_str = ""
+                for name, val in attrs:
+                    if val is None:
+                        attr_str += f" {name}"
+                    else:
+                        attr_str += f' {name}="{html_mod.escape(val, quote=True)}"'
+                line = f"{self._pad()}<{tag}{attr_str}>"
+                if tag in INLINE_TAGS:
+                    self.out.append(line)
+                else:
+                    self.out.append(line)
+                if tag in RAW_TAGS:
+                    self.in_raw = True
+                    self.raw_tag = tag
+                if tag not in VOID_TAGS and tag not in INLINE_TAGS:
+                    self.indent += 1
+
+            def handle_endtag(self, tag):
+                if tag in RAW_TAGS:
+                    self.in_raw = False
+                    self.raw_tag = ""
+                if tag not in VOID_TAGS and tag not in INLINE_TAGS:
+                    self.indent = max(0, self.indent - 1)
+                if self.in_raw:
+                    self.out.append(f"</{tag}>")
+                else:
+                    self.out.append(f"{self._pad()}</{tag}>")
+
+            def handle_data(self, data):
+                stripped = data.strip()
+                if stripped:
+                    if self.in_raw:
+                        # Preservar indentación original de scripts/styles
+                        self.out.append(data)
+                    else:
+                        self.out.append(f"{self._pad()}{stripped}")
+
+            def handle_comment(self, data):
+                self.out.append(f"{self._pad()}<!--{data}-->")
+
+            def handle_decl(self, decl):
+                self.out.append(f"<!{decl}>")
+
+            def handle_entityref(self, name):
+                self.out.append(f"&{name};")
+
+            def handle_charref(self, name):
+                self.out.append(f"&#{name};")
+
+        try:
+            f = Formatter()
+            f.feed(html)
+            return "\n".join(line for line in f.out if line.strip() != "")
+        except Exception:
+            return html  # si falla, devolver el HTML original sin formatear
+
+    def _inspector_load(self):
+        """Obtiene el HTML actual de la página y lo muestra en el inspector."""
+        self.inspector_buf.set_text("Cargando HTML…")
+        wv = self._wv()
+
+        # ── Estrategia 1: script_message_handler (más fiable en WebKit 6.0) ──
+        # Registrar un canal JS→Python, ejecutar el script, desregistrar al recibir
+        ucm = wv.get_user_content_manager()
+        handler_name = "prektbrInspector"
+
+        def _on_message(ucm_, msg):
+            try:
+                jsc = msg.get_js_value()
+                html = jsc.to_string() if jsc else ""
+            except Exception:
+                try:
+                    html = msg.to_string()
+                except Exception:
+                    html = "[No se pudo convertir el resultado]"
+            # Desconectar para no acumular handlers
+            try:
+                ucm_.disconnect_by_func(_on_message)
+                ucm_.unregister_script_message_handler(handler_name)
+            except Exception:
+                pass
+            if html and html not in ("undefined", "null"):
+                formatted = self._format_html(html)
+            else:
+                formatted = "[HTML vacío]"
+            GLib.idle_add(lambda h=formatted: self.inspector_buf.set_text(h) or False)
+
+        try:
+            ucm.register_script_message_handler(handler_name)
+            ucm.connect(f"script-message-received::{handler_name}", _on_message)
+            js = f"window.webkit.messageHandlers.{handler_name}.postMessage(document.documentElement.outerHTML);"
+            wv.evaluate_javascript(js, -1, None, None, None, None)
+            return
+        except Exception:
+            pass
+
+        # ── Estrategia 2: run_javascript (WebKit 4.x / algunos builds de 6.0) ──
+        def _on_run(source, result):
+            try:
+                res = source.run_javascript_finish(result)
+                html = res.get_js_value().to_string()
+                if html and html not in ("undefined", "null"):
+                    formatted = self._format_html(html)
+                else:
+                    formatted = "[HTML vacío]"
+                GLib.idle_add(lambda h=formatted: self.inspector_buf.set_text(h) or False)
+            except Exception as e:
+                GLib.idle_add(lambda err=str(e): self.inspector_buf.set_text(
+                    f"[Error: {err}]") or False)
+
+        try:
+            wv.run_javascript("document.documentElement.outerHTML", None, _on_run)
+            return
+        except AttributeError:
+            pass
+
+        # ── Estrategia 3: evaluate_javascript sin callback + polling ──────────
+        GLib.idle_add(lambda: self.inspector_buf.set_text(
+            "[evaluate_javascript no disponible en esta versión de WebKit]") or False)
+
+    def _inspector_apply(self):
+        """Aplica el HTML del inspector a la página actual."""
+        start = self.inspector_buf.get_start_iter()
+        end   = self.inspector_buf.get_end_iter()
+        html  = self.inspector_buf.get_text(start, end, False)
+        # Escapar backticks y backslashes para inyectar seguro
+        html_escaped = html.replace("\\", "\\\\").replace("`", "\\`")
+        js = f"document.open(); document.write(`{html_escaped}`); document.close();"
+        self._wv().evaluate_javascript(js, -1, None, None, None, None)
+
+    def _on_inspector_key(self, ctrl, keyval, keycode, state):
+        ctrl_held = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if ctrl_held and keyval == Gdk.KEY_Return:
+            self._inspector_apply()
+            return True
+        if keyval == Gdk.KEY_Escape:
+            self._close_inspector()
+            return True
+        return False
+
+    # ── Descargas ─────────────────────────────────────────────────────────────
+
+    def _setup_download_handler(self, wv):
+        """Conecta el manejador de descargas al network_session del webview."""
+        ns = wv.get_network_session()
+        if ns:
+            ns.connect("download-started", self._on_download_started)
+
+    def _on_download_started(self, session, download):
+        """En WebKit 6.0 el nombre sugerido llega en decide-destination."""
+        download.connect("decide-destination", self._on_decide_destination)
+        download.connect("failed", self._on_download_failed)
+
+    def _on_decide_destination(self, download, suggested_filename):
+        """Señal correcta en WebKit 6.0 — recibe el nombre sugerido del servidor."""
+        if not suggested_filename:
+            try:
+                req = download.get_request()
+                uri = req.get_uri() if req else ""
+                suggested_filename = os.path.basename(urllib.parse.urlparse(uri).path) or "descarga"
+            except Exception:
+                suggested_filename = "descarga"
+
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Guardar archivo")
+        dialog.set_initial_name(suggested_filename)
+        dialog.save(self, None, self._on_save_dialog_done, download)
+        return True
+
+    def _on_save_dialog_done(self, dialog, result, download):
+        try:
+            gfile = dialog.save_finish(result)
+            dest = gfile.get_path()
+            fname = os.path.basename(dest)
+
+            download.set_destination(dest)
+
+            self.statusbar.set_label(f"Descargando: {fname}  0%")
+            self._dl_progress.set_fraction(0.0)
+            self._dl_progress.set_visible(True)
+
+            def _on_progress(d, _param):
+                p = d.get_estimated_progress()
+                GLib.idle_add(lambda: (
+                    self._dl_progress.set_fraction(p),
+                    self.statusbar.set_label(f"Descargando: {fname}  {int(p * 100)}%")
+                ) and False)
+
+            def _on_finished(d):
+                def _done():
+                    self._dl_progress.set_fraction(1.0)
+                    self.statusbar.set_label(f"Descarga completa: {fname}")
+                    GLib.timeout_add(3500, _cleanup)
+                    return False
+                def _cleanup():
+                    self._dl_progress.set_visible(False)
+                    self._dl_progress.set_fraction(0.0)
+                    self.statusbar.set_label("")
+                    return False
+                GLib.idle_add(_done)
+
+            download.connect("notify::estimated-progress", _on_progress)
+            download.connect("finished", _on_finished)
+
+        except Exception:
+            download.cancel()
+
+    def _on_download_failed(self, download, error):
+        def _err():
+            self._dl_progress.set_visible(False)
+            self._dl_progress.set_fraction(0.0)
+            self.statusbar.set_label(f"Error de descarga: {error}")
+            GLib.timeout_add(4000, lambda: self.statusbar.set_label("") or False)
+            return False
+        GLib.idle_add(_err)
+
+    # ── Recarga sin caché (botón) ─────────────────────────────────────────────
+
+    def _on_reload(self, btn):
+        wv = self._wv()
+        if wv.is_loading():
+            wv.stop_loading()
+        else:
+            wv.reload()
+
+    # ── Toggle terminal ───────────────────────────────────────────────────────
+
+    def _on_toggle_terminal(self, _):
+        if self._inspector_mode:
+            self.statusbar.set_label("Cierra el inspector primero (Esc)")
+            GLib.timeout_add(2000, lambda: self.statusbar.set_label("") or False)
+            return
+        if self.terminal_visible:
+            self.content_area.remove(self._term_scroll)
+            self.terminal_visible = False
+        else:
+            self.content_area.append(self._term_scroll)
+            self.terminal_visible = True
+            self.terminal_tv.grab_focus()
+
+    # ── Navegación ────────────────────────────────────────────────────────────
 
     def _enable_network_mode(self, mode):
         td = self._td()
@@ -1263,22 +1928,16 @@ class BrowserWindow(Gtk.ApplicationWindow):
 
     # ── Terminal ─────────────────────────────────────────────────────────────
 
-    def _on_toggle_terminal(self, _):
-        if self.terminal_visible:
-            self.content_area.remove(self._term_scroll)
-            self.terminal_visible = False
-        else:
-            self.content_area.append(self._term_scroll)
-            self.terminal_visible = True
-            self.terminal_tv.grab_focus()
-
     def _term_print(self, text, no_nl=False):
         end = self.terminal_buf.get_end_iter()
         self.terminal_buf.insert(end, text if no_nl else text + "\n")
         self.terminal_tv.scroll_to_iter(end, 0.0, True, 0.0, 1.0)
 
     def _term_prompt(self):
-        self._term_print("> ", no_nl=True)
+        end = self.terminal_buf.get_end_iter()
+        self.terminal_buf.insert(end, "> ")
+        end2 = self.terminal_buf.get_end_iter()
+        self._prompt_end_mark = self.terminal_buf.create_mark("prompt_end", end2, True)
 
     def _on_terminal_key(self, ctrl, keyval, keycode, state):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
@@ -1297,6 +1956,17 @@ class BrowserWindow(Gtk.ApplicationWindow):
             self._term_print("")
             self._term_prompt()
             return True
+
+        # Proteger el prompt: bloquear borrado/movimiento antes del fin del "> "
+        if keyval in (Gdk.KEY_BackSpace, Gdk.KEY_Delete,
+                      Gdk.KEY_Left, Gdk.KEY_Home,
+                      Gdk.KEY_KP_Left, Gdk.KEY_KP_Home):
+            if hasattr(self, "_prompt_end_mark"):
+                insert_mark = self.terminal_buf.get_insert()
+                cursor = self.terminal_buf.get_iter_at_mark(insert_mark)
+                limit  = self.terminal_buf.get_iter_at_mark(self._prompt_end_mark)
+                if cursor.compare(limit) <= 0:
+                    return True
         return False
 
     # ── Comandos de terminal ──────────────────────────────────────────────────
@@ -1317,8 +1987,10 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 "  closetab              → cierra pestaña actual\n"
                 "  tab <n>               → cambia a pestaña n (1-based)\n"
                 "  back / forward        → historial del navegador\n"
-                "  reload                → recarga\n"
+                "  reload                → recarga normal\n"
+                "  reloadhard            → recarga sin caché\n"
                 "  home                  → página de inicio\n"
+                "  zoom <n>              → nivel de zoom (0.1–5.0, 1.0=normal)\n"
                 "─── Búsqueda ─────────────────────────────────\n"
                 "  ddg <consulta>        → DuckDuckGo\n"
                 "  google <consulta>     → Google\n"
@@ -1345,6 +2017,18 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 "  clearall              → borra datos de todas las pestañas\n"
                 "  about                 → info del navegador\n"
                 "  quit                  → cierra el navegador\n"
+                "─── Atajos de teclado ────────────────────────\n"
+                "  Ctrl+T                → nueva pestaña\n"
+                "  Ctrl+W                → cerrar pestaña\n"
+                "  Ctrl+L                → foco en barra de URL\n"
+                "  Ctrl+R                → recargar\n"
+                "  Ctrl+Shift+R          → recargar sin caché\n"
+                "  Ctrl+F                → buscar en página\n"
+                "  Ctrl++ / Ctrl+-       → zoom in/out\n"
+                "  Ctrl+0                → zoom reset\n"
+                "  Ctrl+Alt+T            → abrir/cerrar terminal\n"
+                "  Ctrl+AltGr+D          → abrir/cerrar inspector HTML\n"
+                "  Alt+Izq / Alt+Der     → atrás / adelante\n"
             )
 
         elif cmd in ("open", "new"):
@@ -1377,8 +2061,26 @@ class BrowserWindow(Gtk.ApplicationWindow):
         elif cmd == "reload":
             self._wv().reload()
 
+        elif cmd == "reloadhard":
+            self._wv().reload_bypass_cache()
+
         elif cmd == "home":
             nav(self.app.home_uri)
+
+        elif cmd == "zoom":
+            if args:
+                try:
+                    level = float(args)
+                    if 0.1 <= level <= 5.0:
+                        self._wv().set_zoom_level(level)
+                        self._term_print(f"Zoom: {level:.1f}x")
+                    else:
+                        self._term_print("Zoom válido: 0.1 – 5.0 (1.0 = normal)")
+                except ValueError:
+                    self._term_print("Uso: zoom <número>  (ej: zoom 1.5)")
+            else:
+                current = self._wv().get_zoom_level()
+                self._term_print(f"Zoom actual: {current:.1f}x  — uso: zoom <número>")
 
         # Búsqueda
         elif cmd == "ddg":
@@ -1477,11 +2179,11 @@ class BrowserWindow(Gtk.ApplicationWindow):
                 if self.app.is_bookmarked(uri):
                     self.app.remove_bookmark(uri)
                     self._term_print(f"Marcador eliminado: {uri}")
-                    self.bookmark_star.set_label("Marcar")
+                    self.bookmark_star.set_label("★")
                 else:
                     self.app.add_bookmark(uri, title)
                     self._term_print(f"Marcador guardado: {title}")
-                    self.bookmark_star.set_label("[Marcado]")
+                    self.bookmark_star.set_label("★")
 
         elif cmd == "bookmarks":
             if not self.app.bookmarks:
@@ -1578,7 +2280,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
         elif cmd in ("quit", "exit"):
             self.app.quit()
             return
-            self._term_print("Arbur Arbustribiet!!!")
 
         else:
             self._term_print(f"Comando desconocido: '{cmd}'  —  escribe 'help'")
