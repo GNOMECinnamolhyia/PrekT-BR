@@ -469,7 +469,7 @@ class BrowserWindow(Gtk.ApplicationWindow):
         root.append(self.statusbar)
         self.set_child(root)
 
-        self._term_print("PrekT-BR v2.0  —  escribe 'help' para ver los comandos")
+        self._term_print("PrekT-BR v2.1  —  escribe 'help' para ver los comandos")
         self._term_prompt()
 
     def _nav_btn(self, label, tooltip, callback):
