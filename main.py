@@ -610,8 +610,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
             proxy_url = "socks5://127.0.0.1:9050"
         elif mode == "i2p":
             proxy_url = "http://127.0.0.1:4444"
-        elif mode == "lokinet":
-            proxy_url = "socks5://127.0.0.1:1080"
 
         if proxy_url:
             ns = WebKit.NetworkSession.new_ephemeral()
@@ -1185,7 +1183,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
         self.badge.remove_css_class("badge-normal")
         self.badge.remove_css_class("badge-tor")
         self.badge.remove_css_class("badge-i2p")
-        self.badge.remove_css_class("badge-lokinet")
         if mode == "tor":
             self.badge.set_label("TOR")
             self.badge.add_css_class("badge-tor")
@@ -1193,10 +1190,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
         elif mode == "i2p":
             self.badge.set_label("I2P")
             self.badge.add_css_class("badge-i2p")
-            self.badge.set_visible(True)
-        elif mode == "lokinet":
-            self.badge.set_label("LOKINET")
-            self.badge.add_css_class("badge-lokinet")
             self.badge.set_visible(True)
         else:
             self.badge.set_label("")
@@ -1246,9 +1239,6 @@ class BrowserWindow(Gtk.ApplicationWindow):
         elif mode == "i2p":
             self._term_print("  MODO I2P ACTIVADO — Proxy HTTP 127.0.0.1:4444")
             self._term_print("  Navega a sitios .i2p normalmente")
-        elif mode == "lokinet":
-            self._term_print("  MODO LOKINET ACTIVADO — Proxy SOCKS5 127.0.0.1:1080")
-            self._term_print("  Navega a sitios .loki normalmente")
         self._term_prompt()
 
     def _disable_network_mode(self):
